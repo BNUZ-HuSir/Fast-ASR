@@ -1,0 +1,25 @@
+#include <windows.h>
+1 ICON "app.ico"
+1 VERSIONINFO
+ FILEVERSION 0,3,1,0
+ PRODUCTVERSION 0,3,1,0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName", "Fast ASR"
+   VALUE "FileDescription", "Fast ASR - Local Speech Input"
+   VALUE "FileVersion", "0.3.1"
+   VALUE "ProductName", "Fast ASR"
+   VALUE "ProductVersion", "0.3.1"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END
+1 24 "app.manifest"

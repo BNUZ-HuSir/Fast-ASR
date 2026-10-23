@@ -1,0 +1,26 @@
+name: Bug report
+description: Report recognition, input, or desktop issues
+title: "[Bug] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本 / Windows 版本 / CPU
+    validations:
+      required: true
+  - type: dropdown
+    id: model
+    attributes:
+      label: 当前模型
+      options:
+        - X-ASR 480 ms INT8
+        - Whisper Large-v3-Turbo Q5
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 重现步骤、预期行为和实际行为
+      description: 输入框问题请写明目标软件；不要上传个人录音或敏感文字。
+    validations:
+      required: true
