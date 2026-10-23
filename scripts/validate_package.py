@@ -3,6 +3,7 @@ import hashlib
 import json
 import zipfile
 from release_common import ROOT, VERSION, NAME, digest
+from check_licenses import license_materials
 
 
 def digest_stream(stream):
@@ -14,6 +15,7 @@ def digest_stream(stream):
 
 def main():
     checks = {}
+    notices = license_materials()
     destination = ROOT / ".build" / ("交付验证-" + VERSION.replace(".", ""))
     destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(ROOT / "dist" / (NAME + ".zip")) as bundle:
@@ -30,6 +32,11 @@ def main():
         checks["default_xasr"] = info["default"] == "x-asr-zh-en-480ms"
         required = ["models/xasr-480ms/encoder.int8.onnx", "models/xasr-480ms/decoder.onnx", "models/xasr-480ms/joiner.int8.onnx", "models/ggml-large-v3-turbo-q5_0.bin", "LICENSE"]
         checks["both_models_and_license"] = all(NAME + "/" + name in bundle.namelist() for name in required)
+        checks["upstream_notices_and_disclosures"] = all(
+            NAME + "/" + relative.as_posix() in bundle.namelist()
+            and hashlib.sha256(bundle.read(NAME + "/" + relative.as_posix())).hexdigest() == digest(source)
+            for source, relative in notices
+        )
         checks["retired_weights_absent"] = not any("ggml-small" in name or "2023-02-" in name for name in bundle.namelist())
         checks["no_user_history_bundled"] = not any(name.startswith((NAME + "/data/", NAME + "/reports/")) for name in bundle.namelist())
         for name in bundle.namelist():
@@ -39,6 +46,12 @@ def main():
     with zipfile.ZipFile(ROOT / "dist" / f"FastASR-{VERSION}-source.zip") as bundle:
         checks["source_crc"] = bundle.testzip() is None
         required = ["LICENSE", "Cargo.lock", "src/xasr_bridge.cpp", "scripts/prepare_assets.py", "scripts/verify.ps1", "scripts/prepare_whisper.py", ".github/workflows/windows.yml", "vendor/samples/asr/46.wav"]
+        required += ["scripts/check_licenses.py", "vendor/licenses/SOURCES.json", "docs/LEGAL.md", "docs/sample-provenance.md"]
+        checks["source_notices_and_disclosures"] = all(
+            source.relative_to(ROOT).as_posix() in bundle.namelist()
+            and hashlib.sha256(bundle.read(source.relative_to(ROOT).as_posix())).hexdigest() == digest(source)
+            for source, _ in notices
+        )
         checks["source_build_inputs"] = all(name in bundle.namelist() for name in required)
         checks["source_no_caches_or_secrets"] = not any(name.startswith((".build/", "target/", "reports/", "data/", "dist/")) or name.endswith((".exe", ".dll", ".bin", ".onnx", ".lib", ".exp")) or ".env" in name.split("/") for name in bundle.namelist())
     checks["release_checksums"] = True

@@ -1,0 +1,4 @@
+# Preserve upstream bytes, including their original whitespace, on Windows.
+/vendor/licenses/** -text -whitespace
+/assets/xasr-manifest.json -text
+/assets/whisper-manifest.json -text

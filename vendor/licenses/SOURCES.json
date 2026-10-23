@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-10-23",
+  "scope": "Public upstream license declarations and retained notices for the pinned models and native runtimes. Not an independent audit of training data, recording rights, patents, or every transitive dependency. Model cards are upstream snapshots, not Fast ASR accuracy claims.",
+  "files": [
+    {
+      "name": "X-ASR-LICENSE",
+      "kind": "license",
+      "source": "https://raw.githubusercontent.com/Gilgamesh-J/X-ASR/838297cd47fed858e6cf72eaf5a52f948a3edd73/LICENSE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "sherpa-onnx-LICENSE",
+      "kind": "license",
+      "source": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.8/LICENSE",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "onnxruntime-LICENSE",
+      "kind": "license",
+      "source": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.2/LICENSE",
+      "bytes": 1073,
+      "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+      "license": "MIT"
+    },
+    {
+      "name": "onnxruntime-ThirdPartyNotices.txt",
+      "kind": "third_party_notices",
+      "source": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.2/ThirdPartyNotices.txt",
+      "bytes": 325054,
+      "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
+    },
+    {
+      "name": "whisper.cpp-LICENSE",
+      "kind": "license",
+      "source": "https://raw.githubusercontent.com/ggml-org/whisper.cpp/d1be6fde11ac6e0407606b4e42fe72d34add8037/LICENSE",
+      "bytes": 1078,
+      "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+      "license": "MIT"
+    },
+    {
+      "name": "whisper-model-LICENSE",
+      "kind": "license",
+      "source": "https://raw.githubusercontent.com/openai/whisper/v20250625/LICENSE",
+      "bytes": 1063,
+      "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+      "license": "MIT"
+    },
+    {
+      "name": "silero-vad-LICENSE",
+      "kind": "license",
+      "source": "https://raw.githubusercontent.com/snakers4/silero-vad/6478567951ae5c9979ad7b234185b5515f4be7a1/LICENSE",
+      "bytes": 1075,
+      "sha256": "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b",
+      "license": "MIT"
+    },
+    {
+      "name": "X-ASR-MODEL-CARD.txt",
+      "kind": "model_card",
+      "source": "https://huggingface.co/GilgameshWind/X-ASR-zh-en/raw/689ff18c584d29910da37b6fe904db0c1489c9d1/README.md",
+      "bytes": 21816,
+      "sha256": "7acc6f439d3e39e46de4298ccf8a8f6a483fdc5f9f5d08e61422b63760ec37b1",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "whisper-quantized-MODEL-CARD.txt",
+      "kind": "model_card",
+      "source": "https://huggingface.co/ggerganov/whisper.cpp/raw/5359861c739e955e79d9a303bcbc70fb988958b1/README.md",
+      "bytes": 3196,
+      "sha256": "21fd967098804f33fc84e803fb0e5ab7666d71801f4027cf28a65e7af09c1758",
+      "license": "MIT"
+    },
+    {
+      "name": "whisper-original-MODEL-CARD.txt",
+      "kind": "model_card",
+      "source": "https://huggingface.co/openai/whisper-large-v3-turbo/raw/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/README.md",
+      "bytes": 21196,
+      "sha256": "aaef74a740faca90fa1899c4233ebe17f2093b9846d0acf16d9131bf650e9585",
+      "license": "MIT"
+    },
+    {
+      "name": "silero-converted-MODEL-CARD.txt",
+      "kind": "model_card",
+      "source": "https://huggingface.co/ggml-org/whisper-vad/raw/9ffd54a1e1ee413ddf265af9913beaf518d1639b/README.md",
+      "bytes": 182,
+      "sha256": "6c1077880c654e84e103c34d2f7560e058ee62fecd2bc868db0249641c5d247e",
+      "license": "MIT"
+    },
+    {
+      "name": "X-ASR-ARCHIVE-README.txt",
+      "kind": "archive_readme",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+      "bytes": 96,
+      "sha256": "5fb091fba6a4037bd86ac366463c8332d0449119982dd835041c73ae456cf8d6",
+      "archive_member": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05/README.md",
+      "archive_sha256": "fa5f63d618e5a01526e275a358bb7772e403f84808a4769fba52cffd8160bf74"
+    }
+  ],
+  "components": [
+    {
+      "id": "xasr",
+      "name": "X-ASR-zh-en 480 ms punct INT8",
+      "license": "Apache-2.0",
+      "attribution": "X-ASR authors / Gilgamesh-J (GilgameshWind on Hugging Face); ONNX INT8 distribution from k2-fsa/sherpa-onnx",
+      "project": "https://github.com/Gilgamesh-J/X-ASR",
+      "license_files": [
+        "X-ASR-LICENSE"
+      ],
+      "evidence_files": [
+        "X-ASR-MODEL-CARD.txt",
+        "X-ASR-ARCHIVE-README.txt"
+      ],
+      "artifact_manifest": "assets/xasr-manifest.json",
+      "artifact_manifest_sha256": "aa18694f207c3775771d3542a6868e11bbb9050b51e40a3596bc18c7e13b9bf5"
+    },
+    {
+      "id": "sherpa",
+      "name": "sherpa-onnx 1.13.8",
+      "license": "Apache-2.0",
+      "attribution": "sherpa-onnx contributors, including Xiaomi Corporation; original per-file notices remain upstream",
+      "project": "https://github.com/k2-fsa/sherpa-onnx",
+      "license_files": [
+        "sherpa-onnx-LICENSE"
+      ],
+      "evidence_files": []
+    },
+    {
+      "id": "onnxruntime",
+      "name": "ONNX Runtime 1.28.2 (bundled with sherpa-onnx)",
+      "license": "MIT",
+      "attribution": "Microsoft Corporation and contributors listed in ThirdPartyNotices.txt",
+      "project": "https://github.com/microsoft/onnxruntime",
+      "license_files": [
+        "onnxruntime-LICENSE",
+        "onnxruntime-ThirdPartyNotices.txt"
+      ],
+      "evidence_files": []
+    },
+    {
+      "id": "whisper-runtime",
+      "name": "whisper.cpp / ggml 1.9.5",
+      "license": "MIT",
+      "attribution": "The ggml authors",
+      "project": "https://github.com/ggml-org/whisper.cpp",
+      "license_files": [
+        "whisper.cpp-LICENSE"
+      ],
+      "evidence_files": [],
+      "source_archive_sha256": "7a7a73071939f16bc028ad2f713f16f26e37afb6cc155d0f19e3d65705d2b1d9"
+    },
+    {
+      "id": "whisper-model",
+      "name": "OpenAI Whisper Large-v3-Turbo, upstream ggml Q5_0 conversion",
+      "license": "MIT",
+      "attribution": "OpenAI; ggml conversion distributed by ggerganov/whisper.cpp",
+      "project": "https://huggingface.co/openai/whisper-large-v3-turbo",
+      "license_files": [
+        "whisper-model-LICENSE"
+      ],
+      "evidence_files": [
+        "whisper-original-MODEL-CARD.txt",
+        "whisper-quantized-MODEL-CARD.txt"
+      ],
+      "artifact_manifest": "assets/whisper-manifest.json",
+      "artifact_manifest_sha256": "e8faaa5139f78ebbac662d1deec252a3dac760df2329aa1927cdb5c706d80d66"
+    },
+    {
+      "id": "silero",
+      "name": "Silero VAD 5.1.2, upstream ggml conversion",
+      "license": "MIT",
+      "attribution": "Silero Team; ggml conversion distributed by ggml-org/whisper-vad",
+      "project": "https://github.com/snakers4/silero-vad",
+      "license_files": [
+        "silero-vad-LICENSE"
+      ],
+      "evidence_files": [
+        "silero-converted-MODEL-CARD.txt"
+      ]
+    }
+  ],
+  "notice_review": {
+    "checked_urls": [
+      "https://raw.githubusercontent.com/Gilgamesh-J/X-ASR/838297cd47fed858e6cf72eaf5a52f948a3edd73/NOTICE",
+      "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.8/NOTICE"
+    ],
+    "result": "No root NOTICE at these URLs (HTTP 404 on reviewed_on); the pinned X-ASR and sherpa runtime archives contain no file named LICENSE or NOTICE. This does not establish absence of notices in all upstream source subdirectories."
+  }
+}

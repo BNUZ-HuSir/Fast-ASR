@@ -33,6 +33,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Rust selection failed' }
           python --version
           cmake --version
+      - name: Check retained upstream notices
+        shell: pwsh
+        run: |
+          python scripts/check_licenses.py
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream notice integrity check failed' }
+          python scripts/test_licenses.py
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream notice regression failed' }
       - name: Prepare pinned dependencies and build
         shell: pwsh
         run: ./scripts/build.ps1 -PrepareAssets

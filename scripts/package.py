@@ -5,12 +5,14 @@ from pathlib import Path
 import shutil
 import zipfile
 from release_common import ROOT, VERSION, NAME, REPORT_NAMES, UI_REPORT_NAMES, digest, source_files
+from check_licenses import license_materials
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-ui", action="store_true", help="Require desktop input and pin-button regression reports")
     args = parser.parse_args()
+    notices = license_materials()
     executable = ROOT / ".build/target/release/fast-asr.exe"
     executable_hash = digest(executable)
     report_dir = ROOT / "reports"
@@ -61,11 +63,10 @@ def main():
         copy(Path("assets") / name, Path("models") / name)
     for file in (ROOT / "vendor/samples/asr").glob("*.wav"):
         copy(file, Path("samples") / file.name)
-    for name in ["README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "CHANGELOG.md"]:
+    for name in ["README.md", "LICENSE", "CHANGELOG.md"]:
         copy(name, name)
-    for file in (ROOT / "vendor/licenses").iterdir():
-        if file.is_file():
-            copy(file, Path("licenses") / file.name)
+    for file, destination in notices:
+        copy(file, destination)
     metadata = json.loads((ROOT / ".build/cargo-metadata.json").read_text(encoding="utf-8-sig"))
     inventory = []
     for crate in metadata["packages"]:

@@ -18,7 +18,7 @@ def digest(path):
     return h.hexdigest()
 
 def source_files():
-    files = [ROOT / n for n in ["Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", ".gitignore"]]
+    files = [ROOT / n for n in ["Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", ".gitignore", ".gitattributes"]]
     files += sorted((ROOT / "src").glob("*.rs"))
     files += [ROOT / "src" / n for n in ["whisper_bridge.cpp", "xasr_bridge.cpp"]]
     files += [ROOT / "assets" / n for n in ["app.ico", "app.rc", "app.manifest", "whisper-manifest.json", "xasr-manifest.json"]]

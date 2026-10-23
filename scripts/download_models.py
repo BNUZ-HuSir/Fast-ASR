@@ -7,6 +7,7 @@ import time
 
 from prepare_whisper import fetch, sha
 from prepare_xasr import extract
+from check_licenses import install_license_materials, license_materials
 
 ROOT = Path(__file__).resolve().parents[1]
 VAD_NAME = "ggml-silero-v5.1.2.bin"
@@ -83,6 +84,7 @@ def main():
                         help="Existing extracted app folder containing FastASR.exe and runtime/; default: source layout")
     parser.add_argument("--verify-only", action="store_true", help="Check sizes and SHA-256 without downloading")
     args = parser.parse_args()
+    license_materials()
     portable = args.portable_dir is not None
     if portable:
         app = args.portable_dir.resolve()
@@ -91,6 +93,7 @@ def main():
         base = app / "models"
     else:
         base = ROOT / "vendor/models"
+    install_license_materials(app if portable else base, verify_only=args.verify_only)
     if args.model in ("xasr", "all"):
         prepare_xasr(base, portable, args.verify_only)
     if args.model in ("turbo", "all"):

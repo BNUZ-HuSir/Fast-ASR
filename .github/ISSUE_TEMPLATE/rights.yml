@@ -1,0 +1,31 @@
+name: 版权与授权反馈
+description: 反馈具体资源的许可、署名或分发问题；请勿提交敏感个人信息。
+title: "[授权反馈] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请指出具体资源，便于维护者核查，必要时暂停相关资源下载或分发。
+        公开 issue 不要附身份证件、私人住址、密钥或未获授权的录音。
+        此表单不是正式法律通知的唯一渠道，也不限制您的法定权利。
+  - type: textarea
+    id: resource
+    attributes:
+      label: 涉及的资源与位置
+      description: 文件名、仓库路径、模型名、版本或上游链接。
+    validations:
+      required: true
+  - type: textarea
+    id: basis
+    attributes:
+      label: 问题说明与依据
+      description: 许可或署名不匹配之处，可提供公开来源；不必公开敏感证明材料。
+    validations:
+      required: true
+  - type: textarea
+    id: requested_action
+    attributes:
+      label: 希望采取的措施
+      description: 例如补正署名、补充许可、暂停相关资源分发。
+    validations:
+      required: true

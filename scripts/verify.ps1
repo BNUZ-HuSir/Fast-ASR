@@ -25,6 +25,10 @@ function Invoke-Diagnostic([string[]]$Arguments, [string]$ReportName) {
 }
 Push-Location -LiteralPath $projectRoot
 try {
+    python scripts/check_licenses.py
+    if ($LASTEXITCODE -ne 0) { throw 'Upstream notice integrity check failed' }
+    python scripts/test_licenses.py
+    if ($LASTEXITCODE -ne 0) { throw 'Upstream notice regression failed' }
     cargo fmt --check
     if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
     cargo test --locked
