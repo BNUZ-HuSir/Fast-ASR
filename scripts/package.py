@@ -79,7 +79,7 @@ def main():
     inventory_path = ROOT / ".build/rust-dependencies.json"
     inventory_path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
     copy(inventory_path, "licenses/rust-dependencies.json")
-    for name in ["architecture.md", "usage.md", "validation.md", "release-review-0.3.1.md"]:
+    for name in ["architecture.md", "usage.md", "validation.md", "release-review-0.3.1.md", "release-review-0.3.2.md"]:
         copy(Path("docs") / name, Path("docs") / name)
     for file in (ROOT / "docs/images").glob("*.png"):
         copy(file, Path("docs/images") / file.name)

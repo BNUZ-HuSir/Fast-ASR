@@ -27,7 +27,7 @@ struct Online {
     const SherpaOnnxOnlineRecognizer* recognizer=nullptr;
     const SherpaOnnxOnlineStream* stream=nullptr;
     std::string encoder,decoder,joiner,tokens;
-    int threads=4,silence_ms=600;
+    int threads=4,silence_ms=0;
     #define DECLARE(name) decltype(&name) name=nullptr;
     ONLINE_APIS(DECLARE)
     #undef DECLARE
@@ -58,7 +58,7 @@ struct Online {
         c.model_config.transducer.encoder=encoder.c_str();c.model_config.transducer.decoder=decoder.c_str();
         c.model_config.transducer.joiner=joiner.c_str();c.model_config.tokens=tokens.c_str();
         c.model_config.provider="cpu";c.model_config.num_threads=threads;
-        c.decoding_method="greedy_search";c.enable_endpoint=1;
+        c.decoding_method="greedy_search";c.enable_endpoint=silence_ms>0?1:0;
         c.rule1_min_trailing_silence=2.4f;c.rule2_min_trailing_silence=silence_ms/1000.f;c.rule3_min_utterance_length=30.f;
         recognizer=SherpaOnnxCreateOnlineRecognizer(&c);
         if(!recognizer)throw std::runtime_error("Cannot load X-ASR online recognizer");

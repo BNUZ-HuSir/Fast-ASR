@@ -16,7 +16,7 @@ use windows_sys::Win32::{
     Graphics::Gdi::*,
     System::LibraryLoader::GetModuleHandleW,
     UI::{
-        Accessibility::UnhookWinEvent, Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*,
+        Accessibility::UnhookWinEvent, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*,
         WindowsAndMessaging::*,
     },
 };
@@ -32,6 +32,8 @@ const TEXT: u32 = 0x00f3f4f6;
 const MUTED: u32 = 0x00b8a797;
 const TEAL: u32 = 0x00b4d92d;
 const AMBER: u32 = 0x006fc6ff;
+const GREEN: u32 = 0x0066c522;
+const RED: u32 = 0x005252ef;
 
 pub struct App {
     hwnd: HWND,
@@ -41,6 +43,9 @@ pub struct App {
     worker: Worker,
     ready: bool,
     listening: bool,
+    start_pending: bool,
+    stop_pending: bool,
+    hold_pressed: bool,
     busy: bool,
     target: Option<Target>,
     paused: bool,
@@ -62,7 +67,9 @@ pub struct App {
     mic_combo: HWND,
     model_combo: HWND,
     pause_combo: HWND,
-    hotkey_check: HWND,
+    hotkey_mode_combo: HWND,
+    vad_combo: HWND,
+    min_speech_combo: HWND,
     hotkey_registered: bool,
     probe_stage: Option<u32>,
     probe_benchmark: Option<serde_json::Value>,
@@ -123,6 +130,31 @@ impl App {
         ("就绪", TEAL)
     }
     fn toggle(&mut self) {
+        if self.listening || self.start_pending {
+            self.stop(false);
+            return;
+        }
+        self.start(false);
+    }
+    fn hotkey_press(&mut self) {
+        if !self.settings_hwnd.is_null() {
+            return;
+        }
+        if !self.settings.hotkey_hold {
+            self.toggle();
+            return;
+        }
+        if self.hold_pressed || self.busy || self.listening || !self.ready {
+            return;
+        }
+        self.start(true);
+    }
+    fn release_hold(&mut self, chord_down: bool) {
+        if self.hold_pressed && !chord_down {
+            self.stop(false);
+        }
+    }
+    fn start(&mut self, held: bool) {
         if self.busy {
             return;
         }
@@ -153,14 +185,30 @@ impl App {
         } else {
             "未找到输入焦点，识别文字会保留供复制".into()
         };
+        if held && target.is_some() {
+            self.notice = "按住说话，松开后识别并填写 · Esc 取消".into();
+        }
+        self.hold_pressed = held;
+        self.start_pending = true;
+        self.stop_pending = false;
         self.busy = true;
-        let _ = self.worker.tx.send(Command::Start(self.settings.clone()));
+        let command = if held {
+            Command::StartHeld(self.settings.clone())
+        } else {
+            Command::Start(self.settings.clone())
+        };
+        let _ = self.worker.tx.send(command);
     }
     fn stop(&mut self, cancel: bool) {
         // Cancellation must still work while the last utterance is being decoded.
-        if !self.ready || !(self.listening || cancel && self.busy) {
+        if !self.ready
+            || !(self.listening || self.start_pending || cancel && self.busy)
+            || self.stop_pending && !cancel
+        {
             return;
         }
+        self.hold_pressed = false;
+        self.stop_pending = true;
         self.busy = true;
         self.discard_cancelled_text |= cancel;
         let _ = self.worker.tx.send(if cancel {
@@ -232,6 +280,12 @@ impl App {
         };
     }
     fn tick(&mut self) {
+        let chord_down = unsafe {
+            GetAsyncKeyState(VK_CONTROL as i32) < 0
+                && GetAsyncKeyState(VK_MENU as i32) < 0
+                && GetAsyncKeyState(VK_SPACE as i32) < 0
+        };
+        self.release_hold(chord_down);
         while let Ok(event) = self.worker.rx.try_recv() {
             match event {
                 Event::Loading(s) => {
@@ -248,13 +302,17 @@ impl App {
                     .into();
                 }
                 Event::Started => {
+                    self.start_pending = false;
                     self.listening = true;
-                    self.busy = false;
+                    self.busy = self.stop_pending;
                     unsafe {
                         RegisterHotKey(self.hwnd, ESCAPE_HOTKEY, MOD_NOREPEAT, VK_ESCAPE as u32);
                     }
                 }
                 Event::Stopped => {
+                    self.start_pending = false;
+                    self.stop_pending = false;
+                    self.hold_pressed = false;
                     self.discard_cancelled_text = false;
                     unsafe {
                         UnregisterHotKey(self.hwnd, ESCAPE_HOTKEY);
@@ -298,12 +356,18 @@ impl App {
                     self.probe_benchmark = Some(report);
                 }
                 Event::LoadFailed(e) => {
+                    self.start_pending = false;
+                    self.stop_pending = false;
+                    self.hold_pressed = false;
                     self.ready = false;
                     self.busy = false;
                     self.listening = false;
                     self.notice = e;
                 }
                 Event::Error(e) => {
+                    self.start_pending = false;
+                    self.stop_pending = false;
+                    self.hold_pressed = false;
                     unsafe {
                         UnregisterHotKey(self.hwnd, ESCAPE_HOTKEY);
                     }
@@ -441,6 +505,8 @@ impl App {
             pump_test_messages();
             self.probe_stage = Some(98);
             self.listening = true;
+            self.start_pending = false;
+            self.stop_pending = false;
             self.busy = false;
             self.target = Target::capture(self.hwnd);
             self.paused = false;
@@ -526,6 +592,7 @@ impl App {
         }
     }
     fn set_hotkey(&mut self) {
+        self.release_hold(false);
         unsafe {
             if self.hotkey_registered {
                 UnregisterHotKey(self.hwnd, HOTKEY);
@@ -563,8 +630,8 @@ impl App {
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                size(460),
-                size(460),
+                size(480),
+                size(630),
                 self.hwnd,
                 null_mut(),
                 instance,
@@ -664,33 +731,137 @@ impl App {
                 1
             };
             SendMessageW(self.pause_combo, CB_SETCURSEL, selection, 0);
-            self.hotkey_check = child(
-                "BUTTON",
-                "启用 Ctrl + Alt + 空格，切换听写",
-                BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            child(
+                "STATIC",
+                "VAD 语音阈值 · 越低越敏感",
+                0,
                 24,
-                218,
-                390,
-                28,
-                103,
+                224,
+                400,
+                24,
+                0,
             );
+            self.vad_combo = child(
+                "COMBOBOX",
+                "",
+                CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
+                24,
+                250,
+                390,
+                200,
+                105,
+            );
+            for label in [
+                "0.2 · 最敏感",
+                "0.3 · 高灵敏度",
+                "0.4 · 较敏感",
+                "0.5 · 标准（推荐）",
+                "0.6 · 较严格",
+                "0.7 · 严格",
+                "0.8 · 最严格",
+            ] {
+                SendMessageW(
+                    self.vad_combo,
+                    CB_ADDSTRING,
+                    0,
+                    wide(label).as_ptr() as isize,
+                );
+            }
             SendMessageW(
-                self.hotkey_check,
-                BM_SETCHECK,
-                if self.settings.hotkey {
-                    BST_CHECKED as usize
-                } else {
-                    0
-                },
+                self.vad_combo,
+                CB_SETCURSEL,
+                ((self.settings.vad_threshold * 10.).round() as usize)
+                    .saturating_sub(2)
+                    .min(6),
                 0,
             );
             child(
                 "STATIC",
-                "X-ASR 实时预览，停顿后自动填写。\nTurbo 用 CPU 按段识别，速度明显较慢。\n设置与模型保存在软件目录，录音不保存。",
+                "VAD 最短语音 · 过滤短促杂音",
                 0,
                 24,
-                260,
+                292,
                 400,
+                24,
+                0,
+            );
+            self.min_speech_combo = child(
+                "COMBOBOX",
+                "",
+                CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
+                24,
+                318,
+                390,
+                160,
+                106,
+            );
+            for label in [
+                "64 毫秒 · 短词更容易触发",
+                "128 毫秒 · 标准（推荐）",
+                "256 毫秒 · 过滤更多短音",
+                "512 毫秒 · 严格过滤",
+            ] {
+                SendMessageW(
+                    self.min_speech_combo,
+                    CB_ADDSTRING,
+                    0,
+                    wide(label).as_ptr() as isize,
+                );
+            }
+            let selection = match self.settings.vad_min_speech_ms {
+                0..=64 => 0,
+                65..=128 => 1,
+                129..=256 => 2,
+                _ => 3,
+            };
+            SendMessageW(self.min_speech_combo, CB_SETCURSEL, selection, 0);
+            child(
+                "STATIC",
+                "全局快捷键 · Ctrl + Alt + 空格",
+                0,
+                24,
+                360,
+                400,
+                24,
+                0,
+            );
+            self.hotkey_mode_combo = child(
+                "COMBOBOX",
+                "",
+                CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
+                24,
+                386,
+                390,
+                160,
+                103,
+            );
+            for label in [
+                "关闭 · 使用麦克风按钮",
+                "按住录音 · 松开后识别并填写",
+                "按一次开始 · 再按一次停止",
+            ] {
+                SendMessageW(
+                    self.hotkey_mode_combo,
+                    CB_ADDSTRING,
+                    0,
+                    wide(label).as_ptr() as isize,
+                );
+            }
+            let selection = if !self.settings.hotkey {
+                0
+            } else if self.settings.hotkey_hold {
+                1
+            } else {
+                2
+            };
+            SendMessageW(self.hotkey_mode_combo, CB_SETCURSEL, selection, 0);
+            child(
+                "STATIC",
+                "两种模型均使用 Silero VAD，鼠标启动时停顿后填写。\n按住模式松开组合键任一键即停止，最长 60 秒。\nEsc 取消；Turbo 在 CPU 上识别较慢。",
+                0,
+                24,
+                430,
+                420,
                 72,
                 0,
             );
@@ -699,7 +870,7 @@ impl App {
                 "保存",
                 BS_DEFPUSHBUTTON as u32 | WS_TABSTOP,
                 314,
-                345,
+                520,
                 100,
                 32,
                 104,
@@ -727,8 +898,19 @@ impl App {
                 2 => 1000,
                 _ => 600,
             };
-            self.settings.hotkey =
-                SendMessageW(self.hotkey_check, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            let mode = SendMessageW(self.hotkey_mode_combo, CB_GETCURSEL, 0, 0);
+            self.settings.hotkey = mode > 0;
+            self.settings.hotkey_hold = mode == 1;
+            self.settings.vad_threshold =
+                (SendMessageW(self.vad_combo, CB_GETCURSEL, 0, 0).clamp(0, 6) as f32 + 2.) / 10.;
+            self.settings.vad_min_speech_ms =
+                match SendMessageW(self.min_speech_combo, CB_GETCURSEL, 0, 0) {
+                    0 => 64,
+                    2 => 256,
+                    3 => 512,
+                    _ => 128,
+                };
+            self.settings.normalize();
         }
         self.set_hotkey();
         match self.settings.save(&self.home) {
@@ -915,6 +1097,9 @@ impl App {
         }
     }
     fn switch_model(&mut self, kind: ModelKind) {
+        self.hold_pressed = false;
+        self.start_pending = false;
+        self.stop_pending = false;
         self.settings.model = kind;
         let _ = self.settings.save(&self.home);
         self.ready = false;
@@ -1035,21 +1220,7 @@ impl App {
                 },
                 if self.settings.topmost { PANEL } else { BG },
             );
-            text(
-                memory,
-                self.fonts[2],
-                if self.settings.topmost {
-                    "已置顶"
-                } else {
-                    "置顶"
-                },
-                if self.settings.topmost { TEAL } else { MUTED },
-                344,
-                14,
-                400,
-                32,
-                DT_CENTER | DT_SINGLELINE,
-            );
+            draw_pin(memory, self.settings.topmost);
             text(
                 memory,
                 self.fonts[2],
@@ -1072,7 +1243,14 @@ impl App {
                 34,
                 DT_CENTER | DT_SINGLELINE,
             );
-            let accent = if self.listening { TEAL } else { PANEL };
+            let recording = (self.listening || self.start_pending) && !self.stop_pending;
+            let accent = if recording {
+                RED
+            } else if self.busy || !self.ready {
+                PANEL
+            } else {
+                GREEN
+            };
             let brush = CreateSolidBrush(accent);
             let previous = SelectObject(memory, brush);
             let pen = CreatePen(PS_SOLID, 1, accent);
@@ -1082,16 +1260,11 @@ impl App {
             SelectObject(memory, previous_pen);
             DeleteObject(brush);
             DeleteObject(pen);
-            text(
+            draw_record_icon(
                 memory,
-                self.fonts[1],
-                if self.listening { "■" } else { "●" },
-                if self.listening { BG } else { TEAL },
-                18,
-                65,
-                82,
-                100,
-                DT_CENTER | DT_SINGLELINE,
+                recording,
+                self.busy && !self.start_pending,
+                if self.busy && !recording { AMBER } else { TEXT },
             );
             let footer = self.layout_height - 70;
             let saved = SaveDC(memory);
@@ -1124,7 +1297,9 @@ impl App {
                     MUTED,
                 );
             }
-            let subtitle = if self.listening {
+            let subtitle = if self.hold_pressed {
+                "按住录音 · 松开后识别"
+            } else if self.listening {
                 "正在录音 · 停顿后填写"
             } else {
                 "中 / EN · 本地识别"
@@ -1187,6 +1362,61 @@ impl App {
     }
 }
 
+unsafe fn draw_pin(dc: HDC, pinned: bool) {
+    unsafe {
+        let color = if pinned { TEAL } else { MUTED };
+        let pen = CreatePen(PS_SOLID, 2, color);
+        let old_pen = SelectObject(dc, pen);
+        let brush = CreateSolidBrush(if pinned { color } else { BG });
+        let old_brush = SelectObject(dc, brush);
+        let points = [
+            POINT { x: 366, y: 13 },
+            POINT { x: 378, y: 13 },
+            POINT { x: 376, y: 19 },
+            POINT { x: 381, y: 24 },
+            POINT { x: 363, y: 24 },
+            POINT { x: 368, y: 19 },
+        ];
+        Polygon(dc, points.as_ptr(), points.len() as i32);
+        MoveToEx(dc, 372, 24, null_mut());
+        LineTo(dc, 372, 31);
+        if !pinned {
+            MoveToEx(dc, 361, 12, null_mut());
+            LineTo(dc, 383, 32);
+        }
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old_pen);
+        DeleteObject(brush);
+        DeleteObject(pen);
+    }
+}
+unsafe fn draw_record_icon(dc: HDC, recording: bool, processing: bool, color: u32) {
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 2, color);
+        let old_pen = SelectObject(dc, pen);
+        let brush = CreateSolidBrush(color);
+        let old_brush = SelectObject(dc, brush);
+        if recording {
+            RoundRect(dc, 40, 70, 61, 91, 5, 5);
+        } else if processing {
+            for x in [37, 48, 59] {
+                Ellipse(dc, x, 78, x + 5, 83);
+            }
+        } else {
+            RoundRect(dc, 45, 62, 56, 82, 10, 10);
+            SelectObject(dc, GetStockObject(NULL_BRUSH));
+            Arc(dc, 39, 69, 62, 91, 39, 78, 62, 78);
+            MoveToEx(dc, 50, 90, null_mut());
+            LineTo(dc, 50, 97);
+            MoveToEx(dc, 44, 97, null_mut());
+            LineTo(dc, 57, 97);
+        }
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old_pen);
+        DeleteObject(brush);
+        DeleteObject(pen);
+    }
+}
 unsafe fn fill(dc: HDC, rect: RECT, color: u32) {
     unsafe {
         let brush = CreateSolidBrush(color);
@@ -1250,7 +1480,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             WM_HOTKEY => {
                 if w == HOTKEY as usize {
-                    app.toggle();
+                    app.hotkey_press();
                 } else if w == ESCAPE_HOTKEY as usize {
                     app.stop(true);
                 }
@@ -1450,6 +1680,9 @@ pub fn run(home: PathBuf, probe: bool) -> Result<(), String> {
             worker: work,
             ready: false,
             listening: false,
+            start_pending: false,
+            stop_pending: false,
+            hold_pressed: false,
             busy: true,
             target: None,
             paused: false,
@@ -1471,7 +1704,9 @@ pub fn run(home: PathBuf, probe: bool) -> Result<(), String> {
             model_combo: null_mut(),
             mic_combo: null_mut(),
             pause_combo: null_mut(),
-            hotkey_check: null_mut(),
+            hotkey_mode_combo: null_mut(),
+            vad_combo: null_mut(),
+            min_speech_combo: null_mut(),
             hotkey_registered: false,
             probe_stage: if probe { Some(0) } else { None },
             probe_benchmark: None,

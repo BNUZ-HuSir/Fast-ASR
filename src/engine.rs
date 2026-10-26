@@ -186,6 +186,7 @@ impl Drop for Decoder {
 }
 /// 16 kHz / 512 sample frames. VAD runs on capture thread; model inference never blocks it.
 pub struct Segmenter {
+    pub streaming: bool,
     handle: *mut c_void,
     pre: VecDeque<f32>,
     audio: Vec<f32>,
@@ -193,6 +194,9 @@ pub struct Segmenter {
     quiet_frames: usize,
     silence_frames: usize,
     active: bool,
+    threshold: f32,
+    min_speech_frames: usize,
+    emitted: usize,
 }
 impl Segmenter {
     pub fn new(paths: &Paths) -> Result<Self, String> {
@@ -202,6 +206,7 @@ impl Segmenter {
             return Err(error());
         }
         Ok(Self {
+            streaming: paths.kind.streaming(),
             handle,
             pre: VecDeque::new(),
             audio: Vec::new(),
@@ -209,9 +214,18 @@ impl Segmenter {
             quiet_frames: 0,
             silence_frames: 19,
             active: false,
+            threshold: 0.5,
+            min_speech_frames: 4,
+            emitted: 0,
         })
     }
+    pub fn configure(&mut self, settings: &crate::config::Settings) {
+        self.threshold = settings.vad_threshold;
+        self.min_speech_frames = (settings.vad_min_speech_ms as usize).div_ceil(32);
+        self.reset(settings.silence_ms);
+    }
     pub fn reset(&mut self, silence_ms: u32) {
+        self.emitted = 0;
         self.pre.clear();
         self.audio.clear();
         self.speech_frames = 0;
@@ -220,7 +234,7 @@ impl Segmenter {
         self.silence_frames = (silence_ms as usize).div_ceil(32).max(4);
         unsafe { fa_vad_reset(self.handle) };
     }
-    pub fn feed(&mut self, samples: &[f32]) -> Result<Option<Vec<f32>>, String> {
+    fn advance(&mut self, samples: &[f32]) -> Result<bool, String> {
         if samples.len() != 512 {
             return Err("音频帧长度错误".into());
         }
@@ -228,7 +242,12 @@ impl Segmenter {
         if probability < 0. {
             return Err(error());
         }
-        let speech = probability >= if self.active { 0.35 } else { 0.5 };
+        let speech = probability
+            >= if self.active {
+                (self.threshold - 0.15).max(0.05)
+            } else {
+                self.threshold
+            };
         if !self.active {
             self.pre.extend(samples);
             while self.pre.len() > 5120 {
@@ -250,13 +269,42 @@ impl Segmenter {
             }
             // Bound latency and memory during continuous speech, without overlapping committed text.
             if self.quiet_frames >= self.silence_frames || self.audio.len() >= 16000 * 12 {
-                return Ok(self.finish());
+                return Ok(true);
             }
         }
-        Ok(None)
+        Ok(false)
+    }
+    pub fn feed(&mut self, samples: &[f32]) -> Result<Option<Vec<f32>>, String> {
+        if self.advance(samples)? {
+            Ok(self.finish())
+        } else {
+            Ok(None)
+        }
+    }
+    pub fn feed_stream(&mut self, samples: &[f32]) -> Result<(Vec<f32>, bool), String> {
+        let ended = self.advance(samples)?;
+        let output = self.unsent();
+        if ended {
+            let _ = self.finish();
+        }
+        Ok((output, ended))
+    }
+    fn unsent(&mut self) -> Vec<f32> {
+        if self.speech_frames < self.min_speech_frames {
+            return Vec::new();
+        }
+        let output = self.audio[self.emitted..].to_vec();
+        self.emitted = self.audio.len();
+        output
+    }
+    pub fn finish_stream(&mut self) -> Vec<f32> {
+        let output = self.unsent();
+        let _ = self.finish();
+        output
     }
     pub fn finish(&mut self) -> Option<Vec<f32>> {
-        let valid = self.active && self.speech_frames >= 4;
+        let valid = self.active && self.speech_frames >= self.min_speech_frames;
+        self.emitted = 0;
         let audio = std::mem::take(&mut self.audio);
         self.active = false;
         self.speech_frames = 0;

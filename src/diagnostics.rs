@@ -422,6 +422,91 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
         }
         Err("Replay did not finish".into())
     }
+    fn held_replay(worker: &Worker, samples: &[f32], cancel: bool) -> Result<Value, String> {
+        let mut padded = samples.to_vec();
+        padded.resize(samples.len() + 16000 * 8, 0.0);
+        send(worker, Command::ReplayHeld(Settings::default(), padded))?;
+        let start = Instant::now();
+        let mut before_release = 0;
+        let mut finals = Vec::new();
+        let mut captured = 0;
+        let mut released = false;
+        while start.elapsed() < Duration::from_secs(120) {
+            match worker.rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(Event::Captured(n)) => {
+                    captured = n;
+                    if !released && n >= samples.len() as u64 {
+                        send(
+                            worker,
+                            if cancel {
+                                Command::Cancel
+                            } else {
+                                Command::Stop
+                            },
+                        )?;
+                        released = true;
+                    }
+                }
+                Ok(Event::Partial(s)) if !s.is_empty() => {
+                    if !released {
+                        before_release += 1;
+                    }
+                }
+                Ok(Event::Final(s)) => {
+                    if !released {
+                        before_release += 1;
+                    }
+                    finals.push(s);
+                }
+                Ok(Event::Stopped) => {
+                    return Ok(json!({
+                        "passed": released && before_release == 0 && if cancel { finals.is_empty() } else { !finals.is_empty() },
+                        "text_events_before_release": before_release, "explicit_release": released,
+                        "cancelled": cancel, "captured_samples": captured, "finals": finals,
+                        "elapsed_seconds": start.elapsed().as_secs_f64()
+                    }));
+                }
+                Ok(Event::Error(e) | Event::LoadFailed(e)) => return Err(e),
+                _ => {}
+            }
+        }
+        Err("Held replay timed out".into())
+    }
+    fn immediate_release(worker: &Worker, samples: &[f32]) -> Result<bool, String> {
+        send(
+            worker,
+            Command::ReplayHeld(Settings::default(), samples.to_vec()),
+        )?;
+        send(worker, Command::Stop)?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(20) {
+            match worker.rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(Event::Stopped) => return Ok(true),
+                Ok(Event::Final(s)) if !s.is_empty() => return Ok(false),
+                Ok(Event::Error(e) | Event::LoadFailed(e)) => return Err(e),
+                _ => {}
+            }
+        }
+        Err("Immediate release timed out".into())
+    }
+    fn silent_vad(worker: &Worker) -> Result<bool, String> {
+        let settings = Settings {
+            vad_threshold: 0.2,
+            vad_min_speech_ms: 64,
+            ..Settings::default()
+        };
+        send(worker, Command::Replay(settings, vec![0.0; 16000]))?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(20) {
+            match worker.rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(Event::Stopped) => return Ok(true),
+                Ok(Event::Partial(s) | Event::Final(s)) if !s.is_empty() => return Ok(false),
+                Ok(Event::Error(e) | Event::LoadFailed(e)) => return Err(e),
+                _ => {}
+            }
+        }
+        Err("Silent VAD replay timed out".into())
+    }
     fn cancel(worker: &Worker, samples: &[f32]) -> Result<bool, String> {
         send(
             worker,
@@ -448,17 +533,23 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
     let result = (|| -> Result<Value, String> {
         let initial = ready(&worker)?;
         let first = replay(&worker, &samples)?;
+        let held = held_replay(&worker, &samples, false)?;
+        let held_cancel = held_replay(&worker, &samples, true)?;
+        let quick_release = immediate_release(&worker, &samples)?;
+        let silence = silent_vad(&worker)?;
         let cancelled = cancel(&worker, &samples)?;
         let restart = replay(&worker, &samples)?;
         send(&worker, Command::Switch(ModelKind::WhisperTurboQ5))?;
         let turbo_load = ready(&worker)?;
         let turbo = bench(&worker)?;
+        let turbo_held = held_replay(&worker, &samples, false)?;
         send(&worker, Command::Switch(ModelKind::XAsr480))?;
         let reload = ready(&worker)?;
         let last = replay(&worker, &samples)?;
         Ok(
             json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,"source":"WAV replay at real-time pace; no microphone capture",
-            "passed":first["passed"]==true&&cancelled&&restart["passed"]==true&&turbo["passed"]==true&&last["passed"]==true&&first["finals"]==restart["finals"]&&first["finals"]==last["finals"],
+            "passed":held["passed"]==true&&held_cancel["passed"]==true&&quick_release&&silence&&turbo_held["passed"]==true&&first["passed"]==true&&cancelled&&restart["passed"]==true&&turbo["passed"]==true&&last["passed"]==true&&first["finals"]==restart["finals"]&&first["finals"]==last["finals"],
+            "held_release":held,"held_cancel":held_cancel,"immediate_release":quick_release,"sensitive_vad_silence":silence,"turbo_held_release":turbo_held,
             "initial_load":initial,"replay":first,"cancel_after_partial":cancelled,"restart":restart,
             "turbo_load":turbo_load,"turbo_benchmark":turbo,"xasr_reload":reload,"after_switch_replay":last}),
         )

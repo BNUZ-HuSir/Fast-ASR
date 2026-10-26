@@ -35,9 +35,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
     cargo clippy --locked --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
+    Invoke-Diagnostic @('--pipeline-probe') 'pipeline-probe.json'
     Invoke-Diagnostic @('--self-test','--model','x-asr-zh-en-480ms','--report','reports/xasr-self-test.json') 'xasr-self-test.json'
     Invoke-Diagnostic @('--self-test','--model','whisper-large-v3-turbo-q5_0','--report','reports/turbo-self-test.json') 'turbo-self-test.json'
-    Invoke-Diagnostic @('--pipeline-probe') 'pipeline-probe.json'
     if ($IncludeUI) {
         Invoke-Diagnostic @('--input-probe') 'input-probe.json'
         Invoke-Diagnostic @('--ui-probe') 'ui-probe.json'

@@ -261,11 +261,6 @@ pub fn ensure(home: &Path, kind: ModelKind, status: impl Fn(String)) -> Result<P
             }
         }
     } else {
-        for name in ["whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll"] {
-            if !paths.runtime.join(name).is_file() {
-                return Err(format!("缺少运行库 {name}，请重新解压完整便携包"));
-            }
-        }
         let manifest = whisper_manifest();
         let file = manifest
             .files
@@ -282,14 +277,19 @@ pub fn ensure(home: &Path, kind: ModelKind, status: impl Fn(String)) -> Result<P
             &file.sha256,
             &status,
         )?;
-        fetch(
-            "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v5.1.2.bin",
-            &paths.vad,
-            885098,
-            "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
-            &status,
-        )?;
     }
+    for name in ["whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll"] {
+        if !paths.runtime.join(name).is_file() {
+            return Err(format!("缺少 VAD 运行库 {name}，请重新解压完整便携包"));
+        }
+    }
+    fetch(
+        "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v5.1.2.bin",
+        &paths.vad,
+        885098,
+        "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
+        &status,
+    )?;
     status(format!("正在加载 {}…", kind.label()));
     Ok(paths)
 }
