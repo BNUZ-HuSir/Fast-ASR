@@ -13,7 +13,7 @@ $reportRoot = Join-Path $projectRoot 'reports'
 New-Item -ItemType Directory -Force -Path $reportRoot | Out-Null
 function Invoke-Diagnostic([string[]]$Arguments, [string]$ReportName) {
     $begin = [DateTime]::UtcNow
-    $windowStyle = if ($ReportName -in @('input-probe.json', 'ui-probe.json')) { 'Normal' } else { 'Hidden' }
+    $windowStyle = if ($ReportName -in @('input-probe.json', 'ui-probe.json', 'hotkey-probe.json')) { 'Normal' } else { 'Hidden' }
     $process = Start-Process -FilePath $exePath -ArgumentList $Arguments -WorkingDirectory $projectRoot -WindowStyle $windowStyle -PassThru -Wait
     if ($process.ExitCode -ne 0) { throw "Diagnostic failed: $ReportName" }
     $reportPath = Join-Path $reportRoot $ReportName
@@ -35,6 +35,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
     cargo clippy --locked --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
+    if ($IncludeUI) { Invoke-Diagnostic @('--hotkey-probe') 'hotkey-probe.json' }
     Invoke-Diagnostic @('--pipeline-probe') 'pipeline-probe.json'
     Invoke-Diagnostic @('--self-test','--model','x-asr-zh-en-480ms','--report','reports/xasr-self-test.json') 'xasr-self-test.json'
     Invoke-Diagnostic @('--self-test','--model','whisper-large-v3-turbo-q5_0','--report','reports/turbo-self-test.json') 'turbo-self-test.json'

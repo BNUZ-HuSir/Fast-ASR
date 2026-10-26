@@ -2,6 +2,7 @@ use crate::{
     assets::ModelKind,
     audio,
     config::Settings,
+    hotkey::{self, AltHotkey},
     input::{self, Target, wide},
     worker::{Command, Event, Worker},
 };
@@ -71,6 +72,7 @@ pub struct App {
     vad_combo: HWND,
     min_speech_combo: HWND,
     hotkey_registered: bool,
+    alt_hotkey: Option<AltHotkey>,
     probe_stage: Option<u32>,
     probe_benchmark: Option<serde_json::Value>,
 }
@@ -142,12 +144,7 @@ impl App {
         }
         if !self.settings.hotkey_hold {
             self.toggle();
-            return;
         }
-        if self.hold_pressed || self.busy || self.listening || !self.ready {
-            return;
-        }
-        self.start(true);
     }
     fn release_hold(&mut self, chord_down: bool) {
         if self.hold_pressed && !chord_down {
@@ -280,12 +277,20 @@ impl App {
         };
     }
     fn tick(&mut self) {
-        let chord_down = unsafe {
-            GetAsyncKeyState(VK_CONTROL as i32) < 0
-                && GetAsyncKeyState(VK_MENU as i32) < 0
-                && GetAsyncKeyState(VK_SPACE as i32) < 0
-        };
-        self.release_hold(chord_down);
+        let alt_allowed = self.settings.hotkey
+            && self.settings.hotkey_hold
+            && self.settings_hwnd.is_null()
+            && self.ready
+            && !self.busy
+            && !self.listening
+            && !self.hold_pressed;
+        if self
+            .alt_hotkey
+            .as_ref()
+            .is_some_and(|hook| hook.poll(alt_allowed))
+        {
+            self.start(true);
+        }
         while let Ok(event) = self.worker.rx.try_recv() {
             match event {
                 Event::Loading(s) => {
@@ -593,12 +598,23 @@ impl App {
     }
     fn set_hotkey(&mut self) {
         self.release_hold(false);
+        self.alt_hotkey = None;
         unsafe {
             if self.hotkey_registered {
                 UnregisterHotKey(self.hwnd, HOTKEY);
                 self.hotkey_registered = false;
             }
-            if self.settings.hotkey {
+            if self.settings.hotkey && self.settings.hotkey_hold {
+                match AltHotkey::install(self.hwnd, false) {
+                    Ok(hook) => {
+                        self.alt_hotkey = Some(hook);
+                    }
+                    Err(e) => {
+                        self.settings.hotkey = false;
+                        self.notice = e;
+                    }
+                }
+            } else if self.settings.hotkey {
                 self.hotkey_registered = RegisterHotKey(
                     self.hwnd,
                     HOTKEY,
@@ -815,16 +831,7 @@ impl App {
                 _ => 3,
             };
             SendMessageW(self.min_speech_combo, CB_SETCURSEL, selection, 0);
-            child(
-                "STATIC",
-                "全局快捷键 · Ctrl + Alt + 空格",
-                0,
-                24,
-                360,
-                400,
-                24,
-                0,
-            );
+            child("STATIC", "全局快捷键", 0, 24, 360, 400, 24, 0);
             self.hotkey_mode_combo = child(
                 "COMBOBOX",
                 "",
@@ -837,8 +844,8 @@ impl App {
             );
             for label in [
                 "关闭 · 使用麦克风按钮",
-                "按住录音 · 松开后识别并填写",
-                "按一次开始 · 再按一次停止",
+                "Alt 长按 0.5 秒录音 · 松开后识别",
+                "Ctrl+Alt+空格 · 按一次开始/停止",
             ] {
                 SendMessageW(
                     self.hotkey_mode_combo,
@@ -857,7 +864,7 @@ impl App {
             SendMessageW(self.hotkey_mode_combo, CB_SETCURSEL, selection, 0);
             child(
                 "STATIC",
-                "两种模型均使用 Silero VAD，鼠标启动时停顿后填写。\n按住模式松开组合键任一键即停止，最长 60 秒。\nEsc 取消；Turbo 在 CPU 上识别较慢。",
+                "两种模型均使用 Silero VAD，鼠标启动时停顿后填写。\n单独按住 Alt 满 0.5 秒开始，松开识别，最长 60 秒。\nEsc 取消；Turbo 在 CPU 上识别较慢。",
                 0,
                 24,
                 430,
@@ -1478,6 +1485,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 app.tick();
                 0
             }
+            hotkey::ALT_FAILED => {
+                app.stop(true);
+                app.settings.hotkey = false;
+                app.set_hotkey();
+                let _ = app.settings.save(&app.home);
+                app.notice = "Alt 键盘转发受限，快捷键已关闭，请使用麦克风按钮".into();
+                0
+            }
+            hotkey::ALT_RELEASE => {
+                app.release_hold(false);
+                0
+            }
+            hotkey::ALT_CANCEL => {
+                app.stop(true);
+                0
+            }
             WM_HOTKEY => {
                 if w == HOTKEY as usize {
                     app.hotkey_press();
@@ -1708,6 +1731,7 @@ pub fn run(home: PathBuf, probe: bool) -> Result<(), String> {
             vad_combo: null_mut(),
             min_speech_combo: null_mut(),
             hotkey_registered: false,
+            alt_hotkey: None,
             probe_stage: if probe { Some(0) } else { None },
             probe_benchmark: None,
         });

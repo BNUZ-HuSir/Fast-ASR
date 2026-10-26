@@ -560,3 +560,218 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
     fs::write(&report, serde_json::to_vec_pretty(&result?).unwrap()).map_err(|e| e.to_string())?;
     Ok(report)
 }
+
+/// Exercise the installed Alt hook against our own EDIT; never opens a microphone.
+pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
+    use crate::hotkey::{self, AltHotkey};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        thread,
+        time::Duration,
+    };
+    use windows_sys::Win32::{
+        Foundation::*, System::LibraryLoader::GetModuleHandleW, UI::Input::KeyboardAndMouse::*,
+    };
+    static MENU_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+        unsafe {
+            // Count native menu activation without entering a modal system-menu loop.
+            if msg == WM_SYSCOMMAND && w & 0xfff0 == SC_KEYMENU as usize {
+                MENU_REQUESTS.fetch_add(1, Ordering::Relaxed);
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, w, l)
+        }
+    }
+    #[derive(Default)]
+    struct Counts {
+        starts: u32,
+        releases: u32,
+        cancels: u32,
+        failures: u32,
+        native_alt: u32,
+        native_combo: u32,
+    }
+    fn pump(hook: &AltHotkey, counts: &mut Counts, millis: u64) {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(millis) {
+            unsafe {
+                let mut msg = zeroed();
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    match msg.message {
+                        hotkey::ALT_RELEASE => counts.releases += 1,
+                        hotkey::ALT_CANCEL => counts.cancels += 1,
+                        hotkey::ALT_FAILED => counts.failures += 1,
+                        WM_SYSKEYDOWN | WM_KEYDOWN
+                            if [VK_MENU as usize, VK_LMENU as usize, VK_RMENU as usize]
+                                .contains(&msg.wParam) =>
+                        {
+                            counts.native_alt += 1
+                        }
+                        WM_SYSKEYDOWN if msg.wParam == 0x41 && msg.lParam & (1 << 29) != 0 => {
+                            counts.native_combo += 1
+                        }
+                        _ => {}
+                    }
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            if hook.poll(true) {
+                counts.starts += 1;
+            }
+            thread::sleep(Duration::from_millis(3));
+        }
+    }
+    fn key(host: HWND, edit: HWND, vk: u16, up: bool) -> Result<(), String> {
+        unsafe {
+            // A native short Alt tap may move focus to this window's menu.
+            // Restore only our own edit; never send test keys to another window.
+            if !up && GetForegroundWindow() == host && GetFocus() != edit {
+                SetFocus(edit);
+            }
+            if !up && (GetForegroundWindow() != host || GetFocus() != edit) {
+                return Err(format!(
+                    "Hotkey test lost focus before key {vk}: host={}, foreground={}, edit={}, focus={}; no key was sent",
+                    host as usize,
+                    GetForegroundWindow() as usize,
+                    edit as usize,
+                    GetFocus() as usize
+                ));
+            }
+            let event = INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: vk,
+                        wScan: 0,
+                        dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                        time: 0,
+                        dwExtraInfo: hotkey::TEST_INPUT,
+                    },
+                },
+            };
+            if SendInput(1, &event, size_of::<INPUT>() as i32) != 1 {
+                return Err("Hotkey test SendInput failed".into());
+            }
+            Ok(())
+        }
+    }
+    unsafe {
+        let instance = GetModuleHandleW(std::ptr::null());
+        let name = wide("FastAsrAltProbe");
+        let mut wc: WNDCLASSEXW = zeroed();
+        wc.cbSize = size_of::<WNDCLASSEXW>() as u32;
+        wc.lpfnWndProc = Some(proc);
+        wc.hInstance = instance;
+        wc.lpszClassName = name.as_ptr();
+        if RegisterClassExW(&wc) == 0 {
+            return Err("Cannot register hotkey diagnostic window".into());
+        }
+        let host = CreateWindowExW(
+            0,
+            name.as_ptr(),
+            wide("Fast ASR · Alt 快捷键自测（不录音）").as_ptr(),
+            WS_OVERLAPPEDWINDOW,
+            100,
+            100,
+            600,
+            200,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null(),
+        );
+        let edit = CreateWindowExW(
+            0,
+            wide("EDIT").as_ptr(),
+            wide("").as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER,
+            20,
+            20,
+            530,
+            50,
+            host,
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null(),
+        );
+        ShowWindow(host, SW_SHOW);
+        focus_probe_window(host, edit);
+        // Drain activation before installing the hook or sending synthetic keys.
+        for _ in 0..30 {
+            let mut msg = zeroed();
+            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let outcome = (|| -> Result<Value, String> {
+            if GetForegroundWindow() != host || GetFocus() != edit {
+                return Err("Hotkey test could not focus its own input".into());
+            }
+            let hook = AltHotkey::install(host, true)?;
+            let mut counts = Counts::default();
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 160);
+            key(host, edit, VK_LMENU, true)?;
+            pump(&hook, &mut counts, 120);
+            let short_alt = counts.starts == 0 && counts.releases == 0 && counts.native_alt > 0;
+            let native_before = counts.native_alt;
+            let menus_before = MENU_REQUESTS.load(Ordering::Relaxed);
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 420);
+            let no_early_start = counts.starts == 0;
+            pump(&hook, &mut counts, 180);
+            let start_after_threshold = counts.starts == 1;
+            for _ in 0..3 {
+                key(host, edit, VK_LMENU, false)?;
+                pump(&hook, &mut counts, 30);
+            }
+            let once_per_hold = counts.starts == 1;
+            key(host, edit, VK_LMENU, true)?;
+            pump(&hook, &mut counts, 120);
+            let release = counts.releases == 1;
+            let no_menu = counts.native_alt == native_before
+                && MENU_REQUESTS.load(Ordering::Relaxed) == menus_before;
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 100);
+            key(host, edit, 0x41, false)?;
+            pump(&hook, &mut counts, 60);
+            key(host, edit, 0x41, true)?;
+            key(host, edit, VK_LMENU, true)?;
+            pump(&hook, &mut counts, 120);
+            let combo = counts.native_combo > 0 && counts.starts == 1;
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 610);
+            key(host, edit, VK_ESCAPE, false)?;
+            pump(&hook, &mut counts, 60);
+            key(host, edit, VK_ESCAPE, true)?;
+            key(host, edit, VK_LMENU, true)?;
+            pump(&hook, &mut counts, 100);
+            let cancel = counts.starts == 2 && counts.cancels == 1 && counts.releases == 1;
+            let no_stuck_modifiers = !input::modifiers_down();
+            let no_characters = GetWindowTextLengthW(edit) == 0;
+            Ok(
+                json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,
+                "source":"Installed Windows low-level Alt hook, synthetic tagged keys, owned EDIT; no microphone",
+                "passed":short_alt&&no_early_start&&start_after_threshold&&once_per_hold&&release&&no_menu&&combo&&cancel&&no_stuck_modifiers&&no_characters&&counts.failures==0,
+                "short_alt_restored":short_alt,"no_start_before_500ms":no_early_start,"starts_after_500ms":start_after_threshold,
+                "once_per_hold":once_per_hold,"release_submits":release,"long_alt_does_not_activate_menu":no_menu,
+                "alt_letter_preserves_native_combo":combo,"escape_cancels":cancel,"no_stuck_modifiers":no_stuck_modifiers,
+                "no_typed_characters":no_characters,"replay_failures":counts.failures,"counts":{"start":counts.starts,"release":counts.releases,"cancel":counts.cancels,"alt":counts.native_alt,"combo":counts.native_combo},"trace":hook.diagnostic_trace()}),
+            )
+        })();
+        // Always balance synthetic keys before closing the test window, including errors.
+        let _ = key(host, edit, 0x41, true);
+        let _ = key(host, edit, VK_ESCAPE, true);
+        let _ = key(host, edit, VK_LMENU, true);
+        DestroyWindow(host);
+        let report = home.join("reports/hotkey-probe.json");
+        fs::create_dir_all(report.parent().unwrap()).map_err(|e| e.to_string())?;
+        fs::write(&report, serde_json::to_vec_pretty(&outcome?).unwrap())
+            .map_err(|e| e.to_string())?;
+        Ok(report)
+    }
+}

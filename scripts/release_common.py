@@ -8,7 +8,7 @@ PACKAGE = re.search(r"(?ms)^\[package\]\s*\n(.*?)(?=^\[|\Z)", (ROOT / "Cargo.tom
 VERSION = re.search(r'(?m)^version\s*=\s*"([^"]+)"', PACKAGE).group(1)
 NAME = f"FastASR-{VERSION}-win-x64"
 REPORT_NAMES = ["xasr-self-test.json", "turbo-self-test.json", "pipeline-probe.json"]
-UI_REPORT_NAMES = ["input-probe.json", "ui-probe.json"]
+UI_REPORT_NAMES = ["input-probe.json", "ui-probe.json", "hotkey-probe.json"]
 
 def digest(path):
     h = hashlib.sha256()

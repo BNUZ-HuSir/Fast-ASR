@@ -4,6 +4,7 @@ mod audio;
 mod config;
 mod diagnostics;
 mod engine;
+mod hotkey;
 mod input;
 mod ui;
 mod worker;
@@ -19,6 +20,8 @@ fn main() {
         diagnostics::run(&home, &args).map(|_| ())
     } else if args.iter().any(|a| a == "--pipeline-probe") {
         diagnostics::pipeline_probe(&home).map(|_| ())
+    } else if args.iter().any(|a| a == "--hotkey-probe") {
+        diagnostics::hotkey_probe(&home).map(|_| ())
     } else if args.iter().any(|a| a == "--input-probe") {
         diagnostics::input_probe(&home).map(|_| ())
     } else {
