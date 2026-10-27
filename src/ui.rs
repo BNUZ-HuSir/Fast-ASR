@@ -2,7 +2,7 @@ use crate::{
     assets::ModelKind,
     audio,
     config::Settings,
-    hotkey::{self, AltHotkey},
+    hotkey::{self, CtrlHotkey},
     input::{self, Target, wide},
     worker::{Command, Event, Worker},
 };
@@ -59,6 +59,9 @@ pub struct App {
     pending: VecDeque<String>,
     transcript: String,
     partial: String,
+    held_text: String,
+    vad_probability: f32,
+    vad_speech: bool,
     notice: String,
     level: f32,
     scale: f32,
@@ -72,7 +75,7 @@ pub struct App {
     vad_combo: HWND,
     min_speech_combo: HWND,
     hotkey_registered: bool,
-    alt_hotkey: Option<AltHotkey>,
+    ctrl_hotkey: Option<CtrlHotkey>,
     probe_stage: Option<u32>,
     probe_benchmark: Option<serde_json::Value>,
 }
@@ -127,7 +130,14 @@ impl App {
             return ("待填写", AMBER);
         }
         if self.listening {
-            return ("正在听写", TEAL);
+            return (
+                if self.vad_speech {
+                    "检测到语音"
+                } else {
+                    "等待语音"
+                },
+                TEAL,
+            );
         }
         ("就绪", TEAL)
     }
@@ -183,8 +193,11 @@ impl App {
             "未找到输入焦点，识别文字会保留供复制".into()
         };
         if held && target.is_some() {
-            self.notice = "按住说话，松开后识别并填写 · Esc 取消".into();
+            self.notice = "按住时实时预览，松开后填写 · Esc 取消".into();
         }
+        self.held_text.clear();
+        self.vad_probability = 0.;
+        self.vad_speech = false;
         self.hold_pressed = held;
         self.start_pending = true;
         self.stop_pending = false;
@@ -204,6 +217,7 @@ impl App {
         {
             return;
         }
+        self.settle_held_text(cancel);
         self.hold_pressed = false;
         self.stop_pending = true;
         self.busy = true;
@@ -214,8 +228,34 @@ impl App {
             Command::Stop
         });
     }
+    fn settle_held_text(&mut self, cancel: bool) {
+        let text = std::mem::take(&mut self.held_text);
+        if !cancel && !text.is_empty() {
+            self.transcript.push_str(&text);
+            self.pending.push_back(text);
+        }
+    }
+    fn accept_final(&mut self, mut text: String) {
+        if self.discard_cancelled_text {
+            return;
+        }
+        self.partial.clear();
+        if text
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            text.push(' ');
+        }
+        if self.hold_pressed {
+            self.held_text.push_str(&text);
+        } else {
+            self.transcript.push_str(&text);
+            self.pending.push_back(text);
+        }
+    }
     fn flush(&mut self) {
-        if self.pending.is_empty() || self.paused || input::modifiers_down() {
+        if self.hold_pressed || self.pending.is_empty() || self.paused || input::modifiers_down() {
             return;
         }
         let Some(target) = self.target else {
@@ -277,7 +317,7 @@ impl App {
         };
     }
     fn tick(&mut self) {
-        let alt_allowed = self.settings.hotkey
+        let ctrl_allowed = self.settings.hotkey
             && self.settings.hotkey_hold
             && self.settings_hwnd.is_null()
             && self.ready
@@ -285,9 +325,9 @@ impl App {
             && !self.listening
             && !self.hold_pressed;
         if self
-            .alt_hotkey
+            .ctrl_hotkey
             .as_ref()
-            .is_some_and(|hook| hook.poll(alt_allowed))
+            .is_some_and(|hook| hook.poll(ctrl_allowed))
         {
             self.start(true);
         }
@@ -315,6 +355,7 @@ impl App {
                     }
                 }
                 Event::Stopped => {
+                    self.settle_held_text(self.discard_cancelled_text);
                     self.start_pending = false;
                     self.stop_pending = false;
                     self.hold_pressed = false;
@@ -335,23 +376,21 @@ impl App {
                         self.partial = s;
                     }
                 }
-                Event::Final(mut s) => {
-                    if self.discard_cancelled_text {
-                        continue;
-                    }
-                    self.partial.clear();
-                    if s.chars().last().is_some_and(|c| c.is_ascii_alphanumeric()) {
-                        s.push(' ');
-                    }
-                    self.transcript.push_str(&s);
-
+                Event::Final(s) => {
+                    self.accept_final(s);
                     let pending_chars: usize = self.pending.iter().map(|s| s.chars().count()).sum();
-                    self.pending.push_back(s);
                     if pending_chars > 12000 {
                         self.stop(false);
                         self.paused = true;
                         self.notice = "待填写文字较多，已暂停录音，请先复制或填写".into();
                     }
+                }
+                Event::Vad {
+                    probability,
+                    speech,
+                } => {
+                    self.vad_probability = probability;
+                    self.vad_speech = speech;
                 }
                 Event::Captured(_) => {}
                 Event::Level(level) => {
@@ -361,6 +400,7 @@ impl App {
                     self.probe_benchmark = Some(report);
                 }
                 Event::LoadFailed(e) => {
+                    self.settle_held_text(true);
                     self.start_pending = false;
                     self.stop_pending = false;
                     self.hold_pressed = false;
@@ -370,6 +410,7 @@ impl App {
                     self.notice = e;
                 }
                 Event::Error(e) => {
+                    self.settle_held_text(true);
                     self.start_pending = false;
                     self.stop_pending = false;
                     self.hold_pressed = false;
@@ -538,6 +579,32 @@ impl App {
                 != 0)
                 == initial_topmost
                 && Settings::load(&self.home).topmost == initial_topmost;
+            self.hold_pressed = true;
+            self.accept_final("长按预览".into());
+            self.partial = "候选".into();
+            self.flush();
+            pump_test_messages();
+            let held_preview = value(edit).is_empty()
+                && self.pending.is_empty()
+                && self.preview().contains("长按预览候选");
+            self.settle_held_text(false);
+            self.hold_pressed = false;
+            self.partial.clear();
+            self.flush();
+            pump_test_messages();
+            let held_commit = value(edit) == "长按预览" && self.held_text.is_empty();
+            SetWindowTextW(edit, wide("").as_ptr());
+            self.transcript.clear();
+            self.hold_pressed = true;
+            self.accept_final("取消草稿".into());
+            self.settle_held_text(true);
+            self.hold_pressed = false;
+            self.flush();
+            pump_test_messages();
+            let held_cancel = value(edit).is_empty()
+                && self.pending.is_empty()
+                && self.held_text.is_empty()
+                && self.transcript.is_empty();
             self.transcript = "复制回归测试".into();
             self.pending.clear();
             self.copy();
@@ -593,21 +660,21 @@ impl App {
             self.resize_to_text();
             let shrunk = self.layout_height == HEIGHT;
             DestroyWindow(host);
-            serde_json::json!({"passed":cancelled_processing&&pin_toggled&&pin_kept_focus&&pin_persisted&&pin_restored&&copied&&copy_resumed&&guarded&&return_resumed&&rearmed&&grown&&scroll_max>0&&full_text&&shrunk,"cancel_while_processing":cancelled_processing,"topmost_button":{"toggles":pin_toggled,"keeps_input_focus":pin_kept_focus,"persists":pin_persisted,"restores":pin_restored},"copy_succeeded":copied,"copy_then_auto_fill":copy_resumed,"other_input_protected":guarded,"return_to_original_resumes":return_resumed,"bind_without_pending_text":rearmed,"long_text":long,"shrinks_when_cleared":shrunk})
+            serde_json::json!({"passed":held_preview&&held_commit&&held_cancel&&cancelled_processing&&pin_toggled&&pin_kept_focus&&pin_persisted&&pin_restored&&copied&&copy_resumed&&guarded&&return_resumed&&rearmed&&grown&&scroll_max>0&&full_text&&shrunk,"held_streaming":{"preview_without_typing":held_preview,"release_commits":held_commit,"cancel_discards":held_cancel},"cancel_while_processing":cancelled_processing,"topmost_button":{"toggles":pin_toggled,"keeps_input_focus":pin_kept_focus,"persists":pin_persisted,"restores":pin_restored},"copy_succeeded":copied,"copy_then_auto_fill":copy_resumed,"other_input_protected":guarded,"return_to_original_resumes":return_resumed,"bind_without_pending_text":rearmed,"long_text":long,"shrinks_when_cleared":shrunk})
         }
     }
     fn set_hotkey(&mut self) {
         self.release_hold(false);
-        self.alt_hotkey = None;
+        self.ctrl_hotkey = None;
         unsafe {
             if self.hotkey_registered {
                 UnregisterHotKey(self.hwnd, HOTKEY);
                 self.hotkey_registered = false;
             }
             if self.settings.hotkey && self.settings.hotkey_hold {
-                match AltHotkey::install(self.hwnd, false) {
+                match CtrlHotkey::install(self.hwnd, false) {
                     Ok(hook) => {
-                        self.alt_hotkey = Some(hook);
+                        self.ctrl_hotkey = Some(hook);
                     }
                     Err(e) => {
                         self.settings.hotkey = false;
@@ -844,7 +911,7 @@ impl App {
             );
             for label in [
                 "关闭 · 使用麦克风按钮",
-                "Alt 长按 0.5 秒录音 · 松开后识别",
+                "Ctrl 长按 0.3 秒录音 · 松开后填写",
                 "Ctrl+Alt+空格 · 按一次开始/停止",
             ] {
                 SendMessageW(
@@ -864,7 +931,7 @@ impl App {
             SendMessageW(self.hotkey_mode_combo, CB_SETCURSEL, selection, 0);
             child(
                 "STATIC",
-                "两种模型均使用 Silero VAD，鼠标启动时停顿后填写。\n单独按住 Alt 满 0.5 秒开始，松开识别，最长 60 秒。\nEsc 取消；Turbo 在 CPU 上识别较慢。",
+                "VAD 随录音工作，不会自行开启麦克风。\nCtrl 长按 0.3 秒开始，松开填写；Esc 取消。\nX-ASR 实时预览，Turbo 分段识别；最长 60 秒。",
                 0,
                 24,
                 430,
@@ -1018,8 +1085,8 @@ impl App {
         }
     }
     fn preview(&self) -> String {
-        if !self.transcript.is_empty() {
-            return format!("{}{}", self.transcript, self.partial);
+        if !self.transcript.is_empty() || !self.held_text.is_empty() {
+            return format!("{}{}{}", self.transcript, self.held_text, self.partial);
         }
         if !self.partial.is_empty() {
             return self.partial.clone();
@@ -1104,6 +1171,7 @@ impl App {
         }
     }
     fn switch_model(&mut self, kind: ModelKind) {
+        self.settle_held_text(false);
         self.hold_pressed = false;
         self.start_pending = false;
         self.stop_pending = false;
@@ -1304,17 +1372,24 @@ impl App {
                     MUTED,
                 );
             }
-            let subtitle = if self.hold_pressed {
-                "按住录音 · 松开后识别"
-            } else if self.listening {
-                "正在录音 · 停顿后填写"
+            let subtitle = if self.listening {
+                format!(
+                    "VAD {:.2} / {:.2} · {}",
+                    self.vad_probability,
+                    self.settings.vad_threshold,
+                    if self.hold_pressed {
+                        "长按"
+                    } else {
+                        "连续"
+                    }
+                )
             } else {
-                "中 / EN · 本地识别"
+                "中 / EN · 本地识别".into()
             };
             text(
                 memory,
                 self.fonts[2],
-                subtitle,
+                &subtitle,
                 MUTED,
                 98,
                 footer,
@@ -1485,19 +1560,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 app.tick();
                 0
             }
-            hotkey::ALT_FAILED => {
+            hotkey::CTRL_FAILED => {
                 app.stop(true);
                 app.settings.hotkey = false;
                 app.set_hotkey();
                 let _ = app.settings.save(&app.home);
-                app.notice = "Alt 键盘转发受限，快捷键已关闭，请使用麦克风按钮".into();
+                app.notice = "Ctrl 键盘转发受限，快捷键已关闭，请使用麦克风按钮".into();
                 0
             }
-            hotkey::ALT_RELEASE => {
+            hotkey::CTRL_RELEASE => {
                 app.release_hold(false);
                 0
             }
-            hotkey::ALT_CANCEL => {
+            hotkey::CTRL_CANCEL => {
                 app.stop(true);
                 0
             }
@@ -1718,6 +1793,9 @@ pub fn run(home: PathBuf, probe: bool) -> Result<(), String> {
             pending: VecDeque::new(),
             transcript: String::new(),
             partial: String::new(),
+            held_text: String::new(),
+            vad_probability: 0.,
+            vad_speech: false,
             notice: "正在加载本地识别模型…".into(),
             level: 0.,
             scale,
@@ -1731,7 +1809,7 @@ pub fn run(home: PathBuf, probe: bool) -> Result<(), String> {
             vad_combo: null_mut(),
             min_speech_combo: null_mut(),
             hotkey_registered: false,
-            alt_hotkey: None,
+            ctrl_hotkey: None,
             probe_stage: if probe { Some(0) } else { None },
             probe_benchmark: None,
         });

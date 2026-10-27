@@ -35,6 +35,7 @@ pub enum Event {
     Partial(String),
     Final(String),
     Level(f32),
+    Vad { probability: f32, speech: bool },
     Captured(u64),
     Error(String),
     LoadFailed(String),
@@ -121,17 +122,10 @@ fn enqueue(tasks: &Sender<(u64, Task)>, queued: &AtomicUsize, id: u64, task: Tas
 fn feed_chunks(
     chunks: Vec<Vec<f32>>,
     segmenter: &mut Option<Segmenter>,
-    deferred: &mut Option<Vec<Vec<f32>>>,
     tasks: &Sender<(u64, Task)>,
     queued: &AtomicUsize,
     id: u64,
 ) -> Result<(), String> {
-    if let Some(buffer) = deferred {
-        // At most 60 seconds (3.84 MB of f32 PCM) before automatic release.
-        let remaining = (16000usize * 60 / 512).saturating_sub(buffer.len());
-        buffer.extend(chunks.into_iter().take(remaining));
-        return Ok(());
-    }
     if let Some(v) = segmenter {
         for chunk in chunks {
             if v.streaming {
@@ -154,17 +148,13 @@ fn feed_chunks(
 fn finish_capture(
     capture: &mut Option<Capture>,
     segmenter: &mut Option<Segmenter>,
-    deferred: &mut Option<Vec<Vec<f32>>>,
     tasks: &Sender<(u64, Task)>,
     queued: &AtomicUsize,
     id: u64,
     events: &Sender<Event>,
 ) -> Result<(), String> {
     if let Some(mut source) = capture.take() {
-        feed_chunks(source.stop_chunks(), segmenter, deferred, tasks, queued, id)?;
-        if let Some(buffer) = deferred.take() {
-            feed_chunks(buffer, segmenter, deferred, tasks, queued, id)?;
-        }
+        feed_chunks(source.stop_chunks(), segmenter, tasks, queued, id)?;
         let _ = events.send(Event::Captured(source.sample_count()));
         if let Some(v) = segmenter {
             if v.streaming {
@@ -277,17 +267,18 @@ impl Worker {
             let mut ready = false;
             let mut segmenter: Option<Segmenter> = None;
             let mut capture: Option<Capture> = None;
-            let mut deferred = None;
+            let mut held_capture = false;
             let mut stopping = false;
             let mut last_audio = Instant::now();
             let mut level_time = Instant::now();
             let mut count_time = Instant::now();
+            let mut vad_time = Instant::now();
             loop {
                 if needs_load {
                     needs_load = false;
                     ready = false;
                     capture = None;
-                    deferred = None;
+                    held_capture = false;
                     stopping = false;
                     let id = generation.load(Ordering::Acquire);
                     match assets::ensure(&home, selected, |s| {
@@ -345,7 +336,7 @@ impl Worker {
                         }
                         Reply::Error(e) => {
                             capture = None;
-                            deferred = None;
+                            held_capture = false;
                             stopping = false;
                             generation.fetch_add(1, Ordering::AcqRel);
                             let _ = events.send(Event::Partial(String::new()));
@@ -377,7 +368,6 @@ impl Worker {
                         if let Err(e) = finish_capture(
                             &mut capture,
                             &mut segmenter,
-                            &mut deferred,
                             &tasks,
                             &queued,
                             id,
@@ -416,7 +406,7 @@ impl Worker {
                         settings.normalize();
                         match source {
                             Ok(source) => {
-                                deferred = held.then(Vec::new);
+                                held_capture = held;
                                 if let Some(v) = segmenter.as_mut() {
                                     v.configure(&settings);
                                 }
@@ -440,7 +430,6 @@ impl Worker {
                         if let Err(e) = finish_capture(
                             &mut capture,
                             &mut segmenter,
-                            &mut deferred,
                             &tasks,
                             &queued,
                             id,
@@ -453,7 +442,7 @@ impl Worker {
                     }
                     Ok(Command::Cancel) => {
                         capture = None;
-                        deferred = None;
+                        held_capture = false;
                         stopping = false;
                         switch_after_stop = None;
                         generation.fetch_add(1, Ordering::AcqRel);
@@ -497,7 +486,6 @@ impl Worker {
                             if let Err(e) = feed_chunks(
                                 chunks,
                                 &mut segmenter,
-                                &mut deferred,
                                 &tasks,
                                 &queued,
                                 generation.load(Ordering::Acquire),
@@ -507,21 +495,28 @@ impl Worker {
                         }
                         Err(e) => failure = Some(e),
                     }
+                    if vad_time.elapsed() >= Duration::from_millis(70) {
+                        if let Some(v) = segmenter.as_ref() {
+                            let _ = events.send(Event::Vad {
+                                probability: v.probability,
+                                speech: v.speech_detected(),
+                            });
+                        }
+                        vad_time = Instant::now();
+                    }
                     if count_time.elapsed() >= Duration::from_millis(200) {
                         let _ = events.send(Event::Captured(source.sample_count()));
                         count_time = Instant::now();
                     }
-                    ended = source.finished()
-                        || deferred
-                            .as_ref()
-                            .is_some_and(|audio: &Vec<Vec<f32>>| audio.len() >= 16000 * 60 / 512);
+                    ended =
+                        source.finished() || (held_capture && source.sample_count() >= 16000 * 60);
                     if last_audio.elapsed() > Duration::from_secs(4) {
                         failure = Some("麦克风没有返回音频，请检查设备连接与权限".into());
                     }
                 }
                 if let Some(e) = failure {
                     capture = None;
-                    deferred = None;
+                    held_capture = false;
                     generation.fetch_add(1, Ordering::AcqRel);
                     let _ = events.send(Event::Partial(String::new()));
                     let _ = events.send(Event::Error(e));
@@ -530,15 +525,9 @@ impl Worker {
                 let overloaded = capture.is_some() && queued.load(Ordering::Relaxed) >= limit;
                 if ended || overloaded {
                     let id = generation.load(Ordering::Acquire);
-                    if let Err(e) = finish_capture(
-                        &mut capture,
-                        &mut segmenter,
-                        &mut deferred,
-                        &tasks,
-                        &queued,
-                        id,
-                        &events,
-                    ) {
+                    if let Err(e) =
+                        finish_capture(&mut capture, &mut segmenter, &tasks, &queued, id, &events)
+                    {
                         let _ = events.send(Event::Error(e));
                     }
                     stopping = true;

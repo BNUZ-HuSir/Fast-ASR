@@ -391,6 +391,9 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
         let mut captured = 0;
         let mut first_partial = None;
         let mut first_final = None;
+        let mut vad_speech = 0;
+        let mut vad_quiet = 0;
+        let mut vad_max = 0f32;
         let mut capture_before_first_final = 0;
         while start.elapsed() < Duration::from_secs(120) {
             match worker.rx.recv_timeout(Duration::from_millis(20)) {
@@ -407,11 +410,23 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
                     }
                     finals.push(s);
                 }
+                Ok(Event::Vad {
+                    probability,
+                    speech,
+                }) => {
+                    vad_max = vad_max.max(probability);
+                    if speech {
+                        vad_speech += 1;
+                    } else {
+                        vad_quiet += 1;
+                    }
+                }
                 Ok(Event::Captured(n)) => captured = n,
                 Ok(Event::Stopped) => {
                     return Ok(
-                        json!({"passed":captured==samples.len() as u64&&!finals.is_empty()&&partials>0&&first_partial<first_final,
+                        json!({"passed":captured==samples.len() as u64&&!finals.is_empty()&&partials>0&&first_partial<first_final&&vad_speech>0&&vad_quiet>0&&vad_max>=0.5,
                 "captured_samples":captured,"expected_samples":samples.len(),"captured_before_first_final":capture_before_first_final,
+                "vad":{"speech_events":vad_speech,"quiet_events":vad_quiet,"max_probability":vad_max},
                 "partial_updates":partials,"first_partial_seconds":first_partial,"first_final_seconds":first_final,
                 "finals":finals,"elapsed_seconds":start.elapsed().as_secs_f64(),"memory":memory()}),
                     );
@@ -422,12 +437,85 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
         }
         Err("Replay did not finish".into())
     }
-    fn held_replay(worker: &Worker, samples: &[f32], cancel: bool) -> Result<Value, String> {
+    fn vad_parameters(paths: &assets::Paths, samples: &[f32]) -> Result<Value, String> {
+        // The worker already owns the shared VAD library; retain that lifetime.
+        let mut vad = crate::engine::Segmenter::new(paths)?;
+        let mut padded = samples.to_vec();
+        padded.resize(samples.len() + 16000 * 2, 0.);
+        let mut run = |threshold: f32, minimum: u32, pause: u32| -> Result<Value, String> {
+            let settings = Settings {
+                vad_threshold: threshold,
+                vad_min_speech_ms: minimum,
+                silence_ms: pause,
+                ..Settings::default()
+            };
+            vad.configure(&settings);
+            let mut first = None;
+            let mut ends = Vec::new();
+            let mut approved = 0;
+            let mut low_frames = 0;
+            let mut high_frames = 0;
+            let mut max_probability = 0f32;
+            for (index, frame) in padded.chunks(512).enumerate() {
+                let mut block = [0f32; 512];
+                block[..frame.len()].copy_from_slice(frame);
+                let (audio, ended) = vad.feed_stream(&block)?;
+                max_probability = max_probability.max(vad.probability);
+                low_frames += usize::from(vad.probability >= 0.2);
+                high_frames += usize::from(vad.probability >= 0.8);
+                if !audio.is_empty() && first.is_none() {
+                    first = Some((index + 1) * 32);
+                }
+                approved += audio.len();
+                if ended {
+                    ends.push((index + 1) * 32);
+                }
+            }
+            Ok(
+                json!({"threshold":threshold,"minimum_speech_ms":minimum,"pause_ms":pause,
+                "first_audio_ms":first,"segment_ends_ms":ends,"approved_samples":approved,
+                "frames_over_0_2":low_frames,"frames_over_0_8":high_frames,
+                "max_probability":max_probability}),
+            )
+        };
+        let sensitive = run(0.2, 64, 400)?;
+        let strict = run(0.8, 64, 400)?;
+        let minimum_short = run(0.5, 64, 400)?;
+        let minimum_long = run(0.5, 512, 400)?;
+        let pause_long = run(0.5, 64, 1000)?;
+        let first = |v: &Value| v["first_audio_ms"].as_u64().unwrap_or(u64::MAX);
+        let last = |v: &Value| {
+            v["segment_ends_ms"]
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        let passed = first(&sensitive) < u64::MAX
+            && first(&strict) >= first(&sensitive)
+            && first(&minimum_long) > first(&minimum_short)
+            && last(&pause_long) > last(&minimum_short)
+            && sensitive["frames_over_0_2"].as_u64().unwrap_or(0)
+                > sensitive["frames_over_0_8"].as_u64().unwrap_or(u64::MAX);
+        Ok(
+            json!({"passed":passed,"source":"Native Silero VAD, same WAV with 2s trailing silence, reset between settings",
+            "sensitive":sensitive,"strict":strict,"minimum_short":minimum_short,
+            "minimum_long":minimum_long,"pause_long":pause_long}),
+        )
+    }
+    fn held_replay(
+        worker: &Worker,
+        samples: &[f32],
+        cancel: bool,
+        streaming: bool,
+    ) -> Result<Value, String> {
         let mut padded = samples.to_vec();
         padded.resize(samples.len() + 16000 * 8, 0.0);
         send(worker, Command::ReplayHeld(Settings::default(), padded))?;
         let start = Instant::now();
         let mut before_release = 0;
+        let mut partials_before_release = 0;
+        let mut finals_after_release = 0;
         let mut finals = Vec::new();
         let mut captured = 0;
         let mut released = false;
@@ -435,7 +523,7 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
             match worker.rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(Event::Captured(n)) => {
                     captured = n;
-                    if !released && n >= samples.len() as u64 {
+                    if !released && n >= (samples.len() + 16000) as u64 {
                         send(
                             worker,
                             if cancel {
@@ -450,17 +538,24 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
                 Ok(Event::Partial(s)) if !s.is_empty() => {
                     if !released {
                         before_release += 1;
+                        partials_before_release += 1;
                     }
                 }
                 Ok(Event::Final(s)) => {
                     if !released {
                         before_release += 1;
                     }
+                    if released {
+                        finals_after_release += 1;
+                    }
                     finals.push(s);
                 }
                 Ok(Event::Stopped) => {
                     return Ok(json!({
-                        "passed": released && before_release == 0 && if cancel { finals.is_empty() } else { !finals.is_empty() },
+                        "passed": released && (!streaming || partials_before_release > 0)
+                            && if cancel { finals_after_release == 0 } else { !finals.is_empty() },
+                        "streaming":streaming,"partials_before_release":partials_before_release,
+                        "finals_after_release":finals_after_release,
                         "text_events_before_release": before_release, "explicit_release": released,
                         "cancelled": cancel, "captured_samples": captured, "finals": finals,
                         "elapsed_seconds": start.elapsed().as_secs_f64()
@@ -497,9 +592,19 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
         };
         send(worker, Command::Replay(settings, vec![0.0; 16000]))?;
         let start = Instant::now();
+        let mut observed = false;
         while start.elapsed() < Duration::from_secs(20) {
             match worker.rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(Event::Stopped) => return Ok(true),
+                Ok(Event::Stopped) => return Ok(observed),
+                Ok(Event::Vad {
+                    probability,
+                    speech,
+                }) => {
+                    if !probability.is_finite() || speech || probability >= 0.2 {
+                        return Ok(false);
+                    }
+                    observed = true;
+                }
                 Ok(Event::Partial(s) | Event::Final(s)) if !s.is_empty() => return Ok(false),
                 Ok(Event::Error(e) | Event::LoadFailed(e)) => return Err(e),
                 _ => {}
@@ -532,9 +637,10 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
     let worker = Worker::spawn(home.to_path_buf(), ModelKind::XAsr480);
     let result = (|| -> Result<Value, String> {
         let initial = ready(&worker)?;
+        let vad_settings = vad_parameters(&paths, &samples)?;
         let first = replay(&worker, &samples)?;
-        let held = held_replay(&worker, &samples, false)?;
-        let held_cancel = held_replay(&worker, &samples, true)?;
+        let held = held_replay(&worker, &samples, false, true)?;
+        let held_cancel = held_replay(&worker, &samples, true, true)?;
         let quick_release = immediate_release(&worker, &samples)?;
         let silence = silent_vad(&worker)?;
         let cancelled = cancel(&worker, &samples)?;
@@ -542,14 +648,14 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
         send(&worker, Command::Switch(ModelKind::WhisperTurboQ5))?;
         let turbo_load = ready(&worker)?;
         let turbo = bench(&worker)?;
-        let turbo_held = held_replay(&worker, &samples, false)?;
+        let turbo_held = held_replay(&worker, &samples, false, false)?;
         send(&worker, Command::Switch(ModelKind::XAsr480))?;
         let reload = ready(&worker)?;
         let last = replay(&worker, &samples)?;
         Ok(
             json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,"source":"WAV replay at real-time pace; no microphone capture",
-            "passed":held["passed"]==true&&held_cancel["passed"]==true&&quick_release&&silence&&turbo_held["passed"]==true&&first["passed"]==true&&cancelled&&restart["passed"]==true&&turbo["passed"]==true&&last["passed"]==true&&first["finals"]==restart["finals"]&&first["finals"]==last["finals"],
-            "held_release":held,"held_cancel":held_cancel,"immediate_release":quick_release,"sensitive_vad_silence":silence,"turbo_held_release":turbo_held,
+            "passed":vad_settings["passed"]==true&&held["passed"]==true&&held_cancel["passed"]==true&&quick_release&&silence&&turbo_held["passed"]==true&&first["passed"]==true&&cancelled&&restart["passed"]==true&&turbo["passed"]==true&&last["passed"]==true&&first["finals"]==restart["finals"]&&first["finals"]==last["finals"],
+            "vad_settings":vad_settings,"held_release":held,"held_cancel":held_cancel,"immediate_release":quick_release,"sensitive_vad_silence":silence,"turbo_held_release":turbo_held,
             "initial_load":initial,"replay":first,"cancel_after_partial":cancelled,"restart":restart,
             "turbo_load":turbo_load,"turbo_benchmark":turbo,"xasr_reload":reload,"after_switch_replay":last}),
         )
@@ -561,9 +667,9 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
     Ok(report)
 }
 
-/// Exercise the installed Alt hook against our own EDIT; never opens a microphone.
+/// Exercise the installed Ctrl hook against our own EDIT; never opens a microphone.
 pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
-    use crate::hotkey::{self, AltHotkey};
+    use crate::hotkey::{self, CtrlHotkey};
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
         thread,
@@ -589,26 +695,30 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
         releases: u32,
         cancels: u32,
         failures: u32,
-        native_alt: u32,
+        native_ctrl: u32,
         native_combo: u32,
     }
-    fn pump(hook: &AltHotkey, counts: &mut Counts, millis: u64) {
+    fn pump(hook: &CtrlHotkey, counts: &mut Counts, millis: u64) {
         let start = Instant::now();
         while start.elapsed() < Duration::from_millis(millis) {
             unsafe {
                 let mut msg = zeroed();
                 while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                     match msg.message {
-                        hotkey::ALT_RELEASE => counts.releases += 1,
-                        hotkey::ALT_CANCEL => counts.cancels += 1,
-                        hotkey::ALT_FAILED => counts.failures += 1,
+                        hotkey::CTRL_RELEASE => counts.releases += 1,
+                        hotkey::CTRL_CANCEL => counts.cancels += 1,
+                        hotkey::CTRL_FAILED => counts.failures += 1,
                         WM_SYSKEYDOWN | WM_KEYDOWN
-                            if [VK_MENU as usize, VK_LMENU as usize, VK_RMENU as usize]
-                                .contains(&msg.wParam) =>
+                            if [
+                                VK_CONTROL as usize,
+                                VK_LCONTROL as usize,
+                                VK_RCONTROL as usize,
+                            ]
+                            .contains(&msg.wParam) =>
                         {
-                            counts.native_alt += 1
+                            counts.native_ctrl += 1
                         }
-                        WM_SYSKEYDOWN if msg.wParam == 0x41 && msg.lParam & (1 << 29) != 0 => {
+                        WM_KEYDOWN if msg.wParam == 0x41 && GetKeyState(VK_CONTROL as i32) < 0 => {
                             counts.native_combo += 1
                         }
                         _ => {}
@@ -625,7 +735,7 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
     }
     fn key(host: HWND, edit: HWND, vk: u16, up: bool) -> Result<(), String> {
         unsafe {
-            // A native short Alt tap may move focus to this window's menu.
+            // A native short Ctrl tap may move focus to this window's menu.
             // Restore only our own edit; never send test keys to another window.
             if !up && GetForegroundWindow() == host && GetFocus() != edit {
                 SetFocus(edit);
@@ -659,7 +769,7 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
     }
     unsafe {
         let instance = GetModuleHandleW(std::ptr::null());
-        let name = wide("FastAsrAltProbe");
+        let name = wide("FastAsrCtrlProbe");
         let mut wc: WNDCLASSEXW = zeroed();
         wc.cbSize = size_of::<WNDCLASSEXW>() as u32;
         wc.lpfnWndProc = Some(proc);
@@ -671,7 +781,7 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
         let host = CreateWindowExW(
             0,
             name.as_ptr(),
-            wide("Fast ASR · Alt 快捷键自测（不录音）").as_ptr(),
+            wide("Fast ASR · Ctrl 快捷键自测（不录音）").as_ptr(),
             WS_OVERLAPPEDWINDOW,
             100,
             100,
@@ -711,62 +821,62 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
             if GetForegroundWindow() != host || GetFocus() != edit {
                 return Err("Hotkey test could not focus its own input".into());
             }
-            let hook = AltHotkey::install(host, true)?;
+            let hook = CtrlHotkey::install(host, true)?;
             let mut counts = Counts::default();
-            key(host, edit, VK_LMENU, false)?;
+            key(host, edit, VK_LCONTROL, false)?;
             pump(&hook, &mut counts, 160);
-            key(host, edit, VK_LMENU, true)?;
+            key(host, edit, VK_LCONTROL, true)?;
             pump(&hook, &mut counts, 120);
-            let short_alt = counts.starts == 0 && counts.releases == 0 && counts.native_alt > 0;
-            let native_before = counts.native_alt;
+            let short_ctrl = counts.starts == 0 && counts.releases == 0 && counts.native_ctrl > 0;
+            let native_before = counts.native_ctrl;
             let menus_before = MENU_REQUESTS.load(Ordering::Relaxed);
-            key(host, edit, VK_LMENU, false)?;
-            pump(&hook, &mut counts, 420);
+            key(host, edit, VK_LCONTROL, false)?;
+            pump(&hook, &mut counts, 220);
             let no_early_start = counts.starts == 0;
             pump(&hook, &mut counts, 180);
             let start_after_threshold = counts.starts == 1;
             for _ in 0..3 {
-                key(host, edit, VK_LMENU, false)?;
+                key(host, edit, VK_LCONTROL, false)?;
                 pump(&hook, &mut counts, 30);
             }
             let once_per_hold = counts.starts == 1;
-            key(host, edit, VK_LMENU, true)?;
+            key(host, edit, VK_LCONTROL, true)?;
             pump(&hook, &mut counts, 120);
             let release = counts.releases == 1;
-            let no_menu = counts.native_alt == native_before
+            let no_menu = counts.native_ctrl == native_before
                 && MENU_REQUESTS.load(Ordering::Relaxed) == menus_before;
-            key(host, edit, VK_LMENU, false)?;
+            key(host, edit, VK_LCONTROL, false)?;
             pump(&hook, &mut counts, 100);
             key(host, edit, 0x41, false)?;
             pump(&hook, &mut counts, 60);
             key(host, edit, 0x41, true)?;
-            key(host, edit, VK_LMENU, true)?;
+            key(host, edit, VK_LCONTROL, true)?;
             pump(&hook, &mut counts, 120);
             let combo = counts.native_combo > 0 && counts.starts == 1;
-            key(host, edit, VK_LMENU, false)?;
-            pump(&hook, &mut counts, 610);
+            key(host, edit, VK_LCONTROL, false)?;
+            pump(&hook, &mut counts, 410);
             key(host, edit, VK_ESCAPE, false)?;
             pump(&hook, &mut counts, 60);
             key(host, edit, VK_ESCAPE, true)?;
-            key(host, edit, VK_LMENU, true)?;
+            key(host, edit, VK_LCONTROL, true)?;
             pump(&hook, &mut counts, 100);
             let cancel = counts.starts == 2 && counts.cancels == 1 && counts.releases == 1;
             let no_stuck_modifiers = !input::modifiers_down();
             let no_characters = GetWindowTextLengthW(edit) == 0;
             Ok(
                 json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,
-                "source":"Installed Windows low-level Alt hook, synthetic tagged keys, owned EDIT; no microphone",
-                "passed":short_alt&&no_early_start&&start_after_threshold&&once_per_hold&&release&&no_menu&&combo&&cancel&&no_stuck_modifiers&&no_characters&&counts.failures==0,
-                "short_alt_restored":short_alt,"no_start_before_500ms":no_early_start,"starts_after_500ms":start_after_threshold,
-                "once_per_hold":once_per_hold,"release_submits":release,"long_alt_does_not_activate_menu":no_menu,
-                "alt_letter_preserves_native_combo":combo,"escape_cancels":cancel,"no_stuck_modifiers":no_stuck_modifiers,
-                "no_typed_characters":no_characters,"replay_failures":counts.failures,"counts":{"start":counts.starts,"release":counts.releases,"cancel":counts.cancels,"alt":counts.native_alt,"combo":counts.native_combo},"trace":hook.diagnostic_trace()}),
+                "source":"Installed Windows low-level Ctrl hook, synthetic tagged keys, owned EDIT; no microphone",
+                "passed":short_ctrl&&no_early_start&&start_after_threshold&&once_per_hold&&release&&no_menu&&combo&&cancel&&no_stuck_modifiers&&no_characters&&counts.failures==0,
+                "short_ctrl_restored":short_ctrl,"no_start_before_300ms":no_early_start,"starts_after_300ms":start_after_threshold,
+                "once_per_hold":once_per_hold,"release_submits":release,"long_ctrl_does_not_activate_menu":no_menu,
+                "ctrl_letter_preserves_native_combo":combo,"escape_cancels":cancel,"no_stuck_modifiers":no_stuck_modifiers,
+                "no_typed_characters":no_characters,"replay_failures":counts.failures,"counts":{"start":counts.starts,"release":counts.releases,"cancel":counts.cancels,"ctrl":counts.native_ctrl,"combo":counts.native_combo},"trace":hook.diagnostic_trace()}),
             )
         })();
         // Always balance synthetic keys before closing the test window, including errors.
         let _ = key(host, edit, 0x41, true);
         let _ = key(host, edit, VK_ESCAPE, true);
-        let _ = key(host, edit, VK_LMENU, true);
+        let _ = key(host, edit, VK_LCONTROL, true);
         DestroyWindow(host);
         let report = home.join("reports/hotkey-probe.json");
         fs::create_dir_all(report.parent().unwrap()).map_err(|e| e.to_string())?;

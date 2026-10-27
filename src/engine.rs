@@ -197,6 +197,7 @@ pub struct Segmenter {
     threshold: f32,
     min_speech_frames: usize,
     emitted: usize,
+    pub probability: f32,
 }
 impl Segmenter {
     pub fn new(paths: &Paths) -> Result<Self, String> {
@@ -217,6 +218,7 @@ impl Segmenter {
             threshold: 0.5,
             min_speech_frames: 4,
             emitted: 0,
+            probability: 0.,
         })
     }
     pub fn configure(&mut self, settings: &crate::config::Settings) {
@@ -226,6 +228,7 @@ impl Segmenter {
     }
     pub fn reset(&mut self, silence_ms: u32) {
         self.emitted = 0;
+        self.probability = 0.;
         self.pre.clear();
         self.audio.clear();
         self.speech_frames = 0;
@@ -239,9 +242,10 @@ impl Segmenter {
             return Err("音频帧长度错误".into());
         }
         let probability = unsafe { fa_vad_probability(self.handle, samples.as_ptr(), 512) };
-        if probability < 0. {
+        if !probability.is_finite() || probability < 0. {
             return Err(error());
         }
+        self.probability = probability;
         let speech = probability
             >= if self.active {
                 (self.threshold - 0.15).max(0.05)
@@ -273,6 +277,9 @@ impl Segmenter {
             }
         }
         Ok(false)
+    }
+    pub fn speech_detected(&self) -> bool {
+        self.active && self.speech_frames >= self.min_speech_frames && self.quiet_frames == 0
     }
     pub fn feed(&mut self, samples: &[f32]) -> Result<Option<Vec<f32>>, String> {
         if self.advance(samples)? {

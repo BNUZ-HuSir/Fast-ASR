@@ -1,4 +1,4 @@
-//! Delayed, standalone Alt gesture. The hook never performs audio or inference work.
+//! Delayed, standalone Ctrl gesture. The hook never performs audio or inference work.
 use std::{cell::RefCell, mem::size_of, ptr::null, ptr::null_mut, time::Instant};
 use windows_sys::Win32::{
     Foundation::*,
@@ -6,12 +6,12 @@ use windows_sys::Win32::{
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
-pub const ALT_RELEASE: u32 = WM_APP + 20;
-pub const ALT_CANCEL: u32 = WM_APP + 21;
-pub const ALT_FAILED: u32 = WM_APP + 22;
+pub const CTRL_RELEASE: u32 = WM_APP + 20;
+pub const CTRL_CANCEL: u32 = WM_APP + 21;
+pub const CTRL_FAILED: u32 = WM_APP + 22;
 const OWN_INPUT: usize = 0x46415352;
 pub const TEST_INPUT: usize = 0x46415354;
-const HOLD_MS: u64 = 500;
+const HOLD_MS: u64 = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Key {
@@ -21,8 +21,8 @@ struct Key {
     up: bool,
 }
 impl Key {
-    fn alt(self) -> bool {
-        [VK_MENU, VK_LMENU, VK_RMENU].contains(&self.vk)
+    fn ctrl(self) -> bool {
+        [VK_CONTROL, VK_LCONTROL, VK_RCONTROL].contains(&self.vk)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,15 +50,15 @@ enum Poll {
 }
 struct Gesture {
     phase: Phase,
-    alt: Key,
+    ctrl: Key,
     since: u64,
 }
 impl Default for Gesture {
     fn default() -> Self {
         Self {
             phase: Phase::Idle,
-            alt: Key {
-                vk: VK_LMENU,
+            ctrl: Key {
+                vk: VK_LCONTROL,
                 scan: 0,
                 extended: false,
                 up: false,
@@ -70,28 +70,28 @@ impl Default for Gesture {
 impl Gesture {
     fn input(&mut self, key: Key, now: u64, allowed: bool, other_down: bool) -> Effect {
         if self.phase == Phase::Idle {
-            if key.alt() && !key.up && allowed && !other_down {
+            if key.ctrl() && !key.up && allowed && !other_down {
                 self.phase = Phase::Pending;
-                self.alt = key;
+                self.ctrl = key;
                 self.since = now;
                 return Effect::Suppress;
             }
             return Effect::Pass;
         }
         if self.phase == Phase::Forwarding {
-            if key.vk == self.alt.vk && key.up {
+            if key.vk == self.ctrl.vk && key.up {
                 self.phase = Phase::Idle;
             }
             return Effect::Pass;
         }
-        if key.vk == self.alt.vk {
+        if key.vk == self.ctrl.vk {
             if !key.up {
                 return Effect::Suppress;
             }
             let previous = self.phase;
             self.phase = Phase::Idle;
             return match previous {
-                Phase::Pending => Effect::Tap(self.alt),
+                Phase::Pending => Effect::Tap(self.ctrl),
                 Phase::Recording => Effect::Release,
                 _ => Effect::Suppress,
             };
@@ -106,7 +106,7 @@ impl Gesture {
             }
             let cancel = self.phase == Phase::Recording;
             self.phase = Phase::Forwarding;
-            return Effect::Combo(self.alt, key, cancel);
+            return Effect::Combo(self.ctrl, key, cancel);
         }
         Effect::Pass
     }
@@ -116,7 +116,7 @@ impl Gesture {
         }
         if !allowed {
             self.phase = Phase::Forwarding;
-            return Poll::Forward(self.alt);
+            return Poll::Forward(self.ctrl);
         }
         if now.saturating_sub(self.since) >= HOLD_MS {
             self.phase = Phase::Recording;
@@ -186,9 +186,10 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
                 extended: event.flags & LLKHF_EXTENDED != 0,
                 up: event.flags & LLKHF_UP != 0,
             };
-            let other_down = key.alt()
+            let other_down = key.ctrl()
                 && (8..=254u16).any(|vk| {
-                    ![VK_MENU, VK_LMENU, VK_RMENU].contains(&vk) && GetAsyncKeyState(vk as i32) < 0
+                    ![VK_CONTROL, VK_LCONTROL, VK_RCONTROL].contains(&vk)
+                        && GetAsyncKeyState(vk as i32) < 0
                 });
             let effect = context.gesture.input(
                 key,
@@ -208,45 +209,45 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         match effect {
             Effect::Pass => CallNextHookEx(null_mut(), code, w, l),
             Effect::Suppress => 1,
-            Effect::Tap(alt) => {
-                if replay(&[alt, Key { up: true, ..alt }]) {
+            Effect::Tap(ctrl) => {
+                if replay(&[ctrl, Key { up: true, ..ctrl }]) {
                     1
                 } else {
-                    PostMessageW(hwnd as HWND, ALT_FAILED, 0, 0);
+                    PostMessageW(hwnd as HWND, CTRL_FAILED, 0, 0);
                     CallNextHookEx(null_mut(), code, w, l)
                 }
             }
-            Effect::Combo(alt, key, cancel) => {
+            Effect::Combo(ctrl, key, cancel) => {
                 if cancel {
-                    PostMessageW(hwnd as HWND, ALT_CANCEL, 0, 0);
+                    PostMessageW(hwnd as HWND, CTRL_CANCEL, 0, 0);
                 }
-                if replay(&[alt, key]) {
+                if replay(&[ctrl, key]) {
                     1
                 } else {
-                    PostMessageW(hwnd as HWND, ALT_FAILED, 0, 0);
+                    PostMessageW(hwnd as HWND, CTRL_FAILED, 0, 0);
                     CallNextHookEx(null_mut(), code, w, l)
                 }
             }
             Effect::Release => {
-                PostMessageW(hwnd as HWND, ALT_RELEASE, 0, 0);
+                PostMessageW(hwnd as HWND, CTRL_RELEASE, 0, 0);
                 1
             }
             Effect::Cancel => {
-                PostMessageW(hwnd as HWND, ALT_CANCEL, 0, 0);
+                PostMessageW(hwnd as HWND, CTRL_CANCEL, 0, 0);
                 1
             }
         }
     }
 }
 
-pub struct AltHotkey {
+pub struct CtrlHotkey {
     handle: HHOOK,
 }
-impl AltHotkey {
+impl CtrlHotkey {
     pub fn install(hwnd: HWND, test_input: bool) -> Result<Self, String> {
         let occupied = CONTEXT.with(|cell| cell.borrow().is_some());
         if occupied {
-            return Err("Alt 快捷键已注册".into());
+            return Err("Ctrl 快捷键已注册".into());
         }
         CONTEXT.with(|cell| {
             *cell.borrow_mut() = Some(Context {
@@ -264,7 +265,7 @@ impl AltHotkey {
         if handle.is_null() {
             CONTEXT.with(|cell| *cell.borrow_mut() = None);
             return Err(format!(
-                "无法启用 Alt 长按快捷键（Windows {}），请使用麦克风按钮",
+                "无法启用 Ctrl 长按快捷键（Windows {}），请使用麦克风按钮",
                 unsafe { GetLastError() }
             ));
         }
@@ -288,18 +289,18 @@ impl AltHotkey {
                 .gesture
                 .poll(context.clock.elapsed().as_millis() as u64, allowed)
         });
-        if let Poll::Forward(alt) = action
-            && !replay(&[alt])
+        if let Poll::Forward(ctrl) = action
+            && !replay(&[ctrl])
         {
             let hwnd = CONTEXT.with(|cell| cell.borrow().as_ref().map_or(0, |c| c.hwnd));
             unsafe {
-                PostMessageW(hwnd as HWND, ALT_FAILED, 0, 0);
+                PostMessageW(hwnd as HWND, CTRL_FAILED, 0, 0);
             }
         }
         action == Poll::Start
     }
 }
-impl Drop for AltHotkey {
+impl Drop for CtrlHotkey {
     fn drop(&mut self) {
         unsafe {
             UnhookWindowsHookEx(self.handle);
@@ -312,7 +313,7 @@ impl Drop for AltHotkey {
             )
         {
             // Restore a down event so the eventual physical release stays balanced.
-            let _ = replay(&[context.gesture.alt]);
+            let _ = replay(&[context.gesture.ctrl]);
         }
     }
 }
@@ -325,69 +326,69 @@ mod tests {
             vk,
             up,
             scan: 0,
-            extended: vk == VK_RMENU,
+            extended: vk == VK_RCONTROL,
         }
     }
     #[test]
-    fn starts_at_500_ms_once_and_releases() {
+    fn starts_at_300_ms_once_and_releases() {
         let mut g = Gesture::default();
         assert_eq!(
-            g.input(key(VK_LMENU, false), 100, true, false),
+            g.input(key(VK_LCONTROL, false), 100, true, false),
             Effect::Suppress
         );
-        assert_eq!(g.poll(599, true), Poll::None);
-        assert_eq!(g.poll(600, true), Poll::Start);
+        assert_eq!(g.poll(399, true), Poll::None);
+        assert_eq!(g.poll(400, true), Poll::Start);
         assert_eq!(g.poll(1600, false), Poll::None);
         assert_eq!(
-            g.input(key(VK_LMENU, true), 1700, false, false),
+            g.input(key(VK_LCONTROL, true), 1700, false, false),
             Effect::Release
         );
         assert_eq!(g.phase, Phase::Idle);
     }
     #[test]
-    fn short_alt_replays_native_tap_without_recording() {
+    fn short_ctrl_replays_native_tap_without_recording() {
         let mut g = Gesture::default();
-        let alt = key(VK_LMENU, false);
-        g.input(alt, 0, true, false);
+        let ctrl = key(VK_LCONTROL, false);
+        g.input(ctrl, 0, true, false);
         assert_eq!(
-            g.input(key(VK_LMENU, true), 499, true, false),
-            Effect::Tap(alt)
+            g.input(key(VK_LCONTROL, true), 299, true, false),
+            Effect::Tap(ctrl)
         );
         assert_eq!(g.poll(1000, true), Poll::None);
     }
     #[test]
-    fn combos_cancel_pending_and_replay_ordered_alt() {
-        for other in [VK_TAB, VK_F4, VK_SPACE, 0x41] {
+    fn combos_cancel_pending_and_replay_ordered_ctrl() {
+        for other in [VK_TAB, VK_F4, VK_SPACE, 0x41, 0x43, 0x56, 0x58, 0x5a] {
             let mut g = Gesture::default();
-            let alt = key(VK_LMENU, false);
+            let ctrl = key(VK_LCONTROL, false);
             let letter = key(other, false);
-            g.input(alt, 0, true, false);
+            g.input(ctrl, 0, true, false);
             assert_eq!(
                 g.input(letter, 100, true, false),
-                Effect::Combo(alt, letter, false)
+                Effect::Combo(ctrl, letter, false)
             );
             assert_eq!(g.poll(1000, true), Poll::None);
             assert_eq!(
-                g.input(key(VK_LMENU, true), 1200, true, false),
+                g.input(key(VK_LCONTROL, true), 1200, true, false),
                 Effect::Pass
             );
         }
     }
     #[test]
-    fn ctrl_alt_altgr_and_unavailable_app_pass_through() {
-        for alt in [VK_LMENU, VK_RMENU] {
+    fn other_modifiers_and_unavailable_app_pass_through() {
+        for ctrl in [VK_LCONTROL, VK_RCONTROL] {
             let mut g = Gesture::default();
-            assert_eq!(g.input(key(alt, false), 0, true, true), Effect::Pass);
+            assert_eq!(g.input(key(ctrl, false), 0, true, true), Effect::Pass);
             assert_eq!(g.poll(1000, true), Poll::None);
-            assert_eq!(g.input(key(alt, false), 0, false, false), Effect::Pass);
+            assert_eq!(g.input(key(ctrl, false), 0, false, false), Effect::Pass);
         }
     }
     #[test]
     fn escape_cancels_and_combo_during_recording_restores_native_input() {
         let mut g = Gesture::default();
-        let alt = key(VK_RMENU, false);
-        g.input(alt, 0, true, false);
-        assert_eq!(g.poll(500, true), Poll::Start);
+        let ctrl = key(VK_RCONTROL, false);
+        g.input(ctrl, 0, true, false);
+        assert_eq!(g.poll(300, true), Poll::Start);
         assert_eq!(
             g.input(key(VK_ESCAPE, false), 600, false, false),
             Effect::Cancel
@@ -397,25 +398,25 @@ mod tests {
             Effect::Suppress
         );
         assert_eq!(
-            g.input(key(VK_RMENU, true), 700, false, false),
+            g.input(key(VK_RCONTROL, true), 700, false, false),
             Effect::Suppress
         );
-        g.input(alt, 1000, true, false);
-        g.poll(1500, true);
+        g.input(ctrl, 1000, true, false);
+        g.poll(1300, true);
         let tab = key(VK_TAB, false);
         assert_eq!(
             g.input(tab, 1600, false, false),
-            Effect::Combo(alt, tab, true)
+            Effect::Combo(ctrl, tab, true)
         );
     }
     #[test]
     fn pending_is_restored_if_settings_or_busy_state_blocks_start() {
         let mut g = Gesture::default();
-        let alt = key(VK_LMENU, false);
-        g.input(alt, 0, true, false);
-        assert_eq!(g.poll(400, false), Poll::Forward(alt));
+        let ctrl = key(VK_LCONTROL, false);
+        g.input(ctrl, 0, true, false);
+        assert_eq!(g.poll(200, false), Poll::Forward(ctrl));
         assert_eq!(
-            g.input(key(VK_LMENU, true), 800, false, false),
+            g.input(key(VK_LCONTROL, true), 800, false, false),
             Effect::Pass
         );
     }
