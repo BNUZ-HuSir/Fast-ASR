@@ -4,11 +4,11 @@
 
 ## 模型下载
 
-模型权重不提交 Git。`python scripts/download_models.py` 默认下载并校验 X-ASR；`--model turbo` 准备 Turbo 与 VAD，`--model all` 准备两套，`--verify-only` 只检查文件。该入口不编译运行库。完整源码构建仍使用下方命令。
+模型权重不提交 Git。`python scripts/download_models.py` 默认下载并校验 X-ASR；本版仅支持 X-ASR，`--verify-only` 只检查文件。该入口不编译运行库。完整源码构建仍使用下方命令。
 
 ## 构建
 
-安装 Rust MSVC（本机验证 1.96.1）、Visual Studio 2022 C++ 桌面开发组件及 Windows SDK、CMake，以及 Python 3.9+。运行：
+安装 Rust MSVC（本机验证 1.96.1）、Visual Studio 2022 C++ 桌面开发组件及 Windows SDK，以及 Python 3.9+。运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1 -PrepareAssets
@@ -25,7 +25,7 @@ IncludeUI 会短暂创建自测输入框、模拟键盘输入并覆盖剪贴板�
 
 提供版本、Windows 版本、CPU、当前模型、重现步骤，以及属于识别错误还是输入框兼容问题。日志请去除个人内容；无需上传真实对话录音。若希望提交语音样本，请确认有权公开，并提供对应文本和采样率。
 
-代码改动应保持原生轻量界面、手动启用录音、焦点保护和取消语义。涉及音频线程或模型切换的改动需要重新运行 WAV 管线；涉及界面或输入的改动需要运行桌面回归。提交前运行格式检查、测试与 Clippy。
+代码改动应保持原生轻量界面、手动启用录音、焦点保护和取消语义。涉及音频线程或模型加载的改动需要重新运行 WAV 管线；涉及界面或输入的改动需要运行桌面回归。提交前运行格式检查、测试与 Clippy。
 
 ## 新增模型与授权材料
 

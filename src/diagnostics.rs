@@ -208,7 +208,7 @@ pub fn run(home: &Path, args: &[String]) -> Result<PathBuf, String> {
             .iter()
             .all(|r| r["segments"].as_array().is_some_and(|s| !s.is_empty()));
     let silence_empty = silence["segments"].as_array().is_some_and(|s| s.is_empty());
-    let content = json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,"model":paths.model.file_name().unwrap().to_string_lossy(),"weights_precision":paths.kind.name(),"runtime":if paths.kind.streaming(){"sherpa-onnx 1.13.8 CPU / streaming endpoint"}else{"whisper.cpp 1.9.5 CPU / Silero VAD"},"model_load_seconds":load_time,"loaded_memory":loaded,"recognition_cases":results,"silence_case":silence,"stress":{"repeat":loops,"additional_audio_seconds":stress_audio,"elapsed_seconds":stress_start.elapsed().as_secs_f64(),"checkpoints":stress_results},"capture":mic_reports,"final_memory":final_memory,"passed":recognized&&silence_empty,"limits":{"memory_metric":"process working set, measured by GetProcessMemoryInfo; this diagnostic has no GUI"}});
+    let content = json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,"model":paths.model.file_name().unwrap().to_string_lossy(),"weights_precision":paths.kind.name(),"runtime":"sherpa-onnx 1.13.8 CPU / native streaming endpoint","model_load_seconds":load_time,"loaded_memory":loaded,"recognition_cases":results,"silence_case":silence,"stress":{"repeat":loops,"additional_audio_seconds":stress_audio,"elapsed_seconds":stress_start.elapsed().as_secs_f64(),"checkpoints":stress_results},"capture":mic_reports,"final_memory":final_memory,"passed":recognized&&silence_empty,"limits":{"memory_metric":"process working set, measured by GetProcessMemoryInfo; this diagnostic has no GUI"}});
     fs::write(&report, serde_json::to_vec_pretty(&content).unwrap()).map_err(|e| e.to_string())?;
     Ok(report)
 }
@@ -391,9 +391,6 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
         let mut captured = 0;
         let mut first_partial = None;
         let mut first_final = None;
-        let mut vad_speech = 0;
-        let mut vad_quiet = 0;
-        let mut vad_max = 0f32;
         let mut capture_before_first_final = 0;
         while start.elapsed() < Duration::from_secs(120) {
             match worker.rx.recv_timeout(Duration::from_millis(20)) {
@@ -410,23 +407,11 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
                     }
                     finals.push(s);
                 }
-                Ok(Event::Vad {
-                    probability,
-                    speech,
-                }) => {
-                    vad_max = vad_max.max(probability);
-                    if speech {
-                        vad_speech += 1;
-                    } else {
-                        vad_quiet += 1;
-                    }
-                }
                 Ok(Event::Captured(n)) => captured = n,
                 Ok(Event::Stopped) => {
                     return Ok(
-                        json!({"passed":captured==samples.len() as u64&&!finals.is_empty()&&partials>0&&first_partial<first_final&&vad_speech>0&&vad_quiet>0&&vad_max>=0.5,
+                        json!({"passed":captured==samples.len() as u64&&!finals.is_empty()&&partials>0&&first_partial<first_final,
                 "captured_samples":captured,"expected_samples":samples.len(),"captured_before_first_final":capture_before_first_final,
-                "vad":{"speech_events":vad_speech,"quiet_events":vad_quiet,"max_probability":vad_max},
                 "partial_updates":partials,"first_partial_seconds":first_partial,"first_final_seconds":first_final,
                 "finals":finals,"elapsed_seconds":start.elapsed().as_secs_f64(),"memory":memory()}),
                     );
@@ -436,72 +421,6 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
             }
         }
         Err("Replay did not finish".into())
-    }
-    fn vad_parameters(paths: &assets::Paths, samples: &[f32]) -> Result<Value, String> {
-        // The worker already owns the shared VAD library; retain that lifetime.
-        let mut vad = crate::engine::Segmenter::new(paths)?;
-        let mut padded = samples.to_vec();
-        padded.resize(samples.len() + 16000 * 2, 0.);
-        let mut run = |threshold: f32, minimum: u32, pause: u32| -> Result<Value, String> {
-            let settings = Settings {
-                vad_threshold: threshold,
-                vad_min_speech_ms: minimum,
-                silence_ms: pause,
-                ..Settings::default()
-            };
-            vad.configure(&settings);
-            let mut first = None;
-            let mut ends = Vec::new();
-            let mut approved = 0;
-            let mut low_frames = 0;
-            let mut high_frames = 0;
-            let mut max_probability = 0f32;
-            for (index, frame) in padded.chunks(512).enumerate() {
-                let mut block = [0f32; 512];
-                block[..frame.len()].copy_from_slice(frame);
-                let (audio, ended) = vad.feed_stream(&block)?;
-                max_probability = max_probability.max(vad.probability);
-                low_frames += usize::from(vad.probability >= 0.2);
-                high_frames += usize::from(vad.probability >= 0.8);
-                if !audio.is_empty() && first.is_none() {
-                    first = Some((index + 1) * 32);
-                }
-                approved += audio.len();
-                if ended {
-                    ends.push((index + 1) * 32);
-                }
-            }
-            Ok(
-                json!({"threshold":threshold,"minimum_speech_ms":minimum,"pause_ms":pause,
-                "first_audio_ms":first,"segment_ends_ms":ends,"approved_samples":approved,
-                "frames_over_0_2":low_frames,"frames_over_0_8":high_frames,
-                "max_probability":max_probability}),
-            )
-        };
-        let sensitive = run(0.2, 64, 400)?;
-        let strict = run(0.8, 64, 400)?;
-        let minimum_short = run(0.5, 64, 400)?;
-        let minimum_long = run(0.5, 512, 400)?;
-        let pause_long = run(0.5, 64, 1000)?;
-        let first = |v: &Value| v["first_audio_ms"].as_u64().unwrap_or(u64::MAX);
-        let last = |v: &Value| {
-            v["segment_ends_ms"]
-                .as_array()
-                .and_then(|a| a.last())
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-        };
-        let passed = first(&sensitive) < u64::MAX
-            && first(&strict) >= first(&sensitive)
-            && first(&minimum_long) > first(&minimum_short)
-            && last(&pause_long) > last(&minimum_short)
-            && sensitive["frames_over_0_2"].as_u64().unwrap_or(0)
-                > sensitive["frames_over_0_8"].as_u64().unwrap_or(u64::MAX);
-        Ok(
-            json!({"passed":passed,"source":"Native Silero VAD, same WAV with 2s trailing silence, reset between settings",
-            "sensitive":sensitive,"strict":strict,"minimum_short":minimum_short,
-            "minimum_long":minimum_long,"pause_long":pause_long}),
-        )
     }
     fn held_replay(
         worker: &Worker,
@@ -584,33 +503,23 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
         }
         Err("Immediate release timed out".into())
     }
-    fn silent_vad(worker: &Worker) -> Result<bool, String> {
-        let settings = Settings {
-            vad_threshold: 0.2,
-            vad_min_speech_ms: 64,
-            ..Settings::default()
-        };
-        send(worker, Command::Replay(settings, vec![0.0; 16000]))?;
+    fn silent_replay(worker: &Worker) -> Result<bool, String> {
+        send(
+            worker,
+            Command::Replay(Settings::default(), vec![0.; 16000 * 3]),
+        )?;
         let start = Instant::now();
-        let mut observed = false;
+        let mut captured = 0;
         while start.elapsed() < Duration::from_secs(20) {
             match worker.rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(Event::Stopped) => return Ok(observed),
-                Ok(Event::Vad {
-                    probability,
-                    speech,
-                }) => {
-                    if !probability.is_finite() || speech || probability >= 0.2 {
-                        return Ok(false);
-                    }
-                    observed = true;
-                }
+                Ok(Event::Captured(n)) => captured = n,
+                Ok(Event::Stopped) => return Ok(captured == 16000 * 3),
                 Ok(Event::Partial(s) | Event::Final(s)) if !s.is_empty() => return Ok(false),
                 Ok(Event::Error(e) | Event::LoadFailed(e)) => return Err(e),
                 _ => {}
             }
         }
-        Err("Silent VAD replay timed out".into())
+        Err("Silent replay timed out".into())
     }
     fn cancel(worker: &Worker, samples: &[f32]) -> Result<bool, String> {
         send(
@@ -637,27 +546,35 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
     let worker = Worker::spawn(home.to_path_buf(), ModelKind::XAsr480);
     let result = (|| -> Result<Value, String> {
         let initial = ready(&worker)?;
-        let vad_settings = vad_parameters(&paths, &samples)?;
         let first = replay(&worker, &samples)?;
         let held = held_replay(&worker, &samples, false, true)?;
         let held_cancel = held_replay(&worker, &samples, true, true)?;
         let quick_release = immediate_release(&worker, &samples)?;
-        let silence = silent_vad(&worker)?;
+        let silence = silent_replay(&worker)?;
         let cancelled = cancel(&worker, &samples)?;
         let restart = replay(&worker, &samples)?;
-        send(&worker, Command::Switch(ModelKind::WhisperTurboQ5))?;
-        let turbo_load = ready(&worker)?;
-        let turbo = bench(&worker)?;
-        let turbo_held = held_replay(&worker, &samples, false, false)?;
-        send(&worker, Command::Switch(ModelKind::XAsr480))?;
+        let benchmark = bench(&worker)?;
+        let mut separated = samples.clone();
+        separated.resize(samples.len() + 16000 * 2, 0.);
+        separated.extend_from_slice(&samples);
+        separated.resize(separated.len() + 16000 * 2, 0.);
+        let continuous = replay(&worker, &separated)?;
+        let endpoints = continuous["finals"]
+            .as_array()
+            .is_some_and(|v| v.len() >= 2)
+            && continuous["first_final_seconds"]
+                .as_f64()
+                .is_some_and(|t| t < samples.len() as f64 / 16000. + 2.);
+        send(&worker, Command::Retry)?;
         let reload = ready(&worker)?;
         let last = replay(&worker, &samples)?;
         Ok(
-            json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,"source":"WAV replay at real-time pace; no microphone capture",
-            "passed":vad_settings["passed"]==true&&held["passed"]==true&&held_cancel["passed"]==true&&quick_release&&silence&&turbo_held["passed"]==true&&first["passed"]==true&&cancelled&&restart["passed"]==true&&turbo["passed"]==true&&last["passed"]==true&&first["finals"]==restart["finals"]&&first["finals"]==last["finals"],
-            "vad_settings":vad_settings,"held_release":held,"held_cancel":held_cancel,"immediate_release":quick_release,"sensitive_vad_silence":silence,"turbo_held_release":turbo_held,
+            json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,
+            "source":"WAV replay at real-time pace; microphone closed; no external VAD",
+            "passed":held["passed"]==true&&held_cancel["passed"]==true&&quick_release&&silence&&first["passed"]==true&&cancelled&&restart["passed"]==true&&benchmark["passed"]==true&&last["passed"]==true&&continuous["passed"]==true&&endpoints&&first["finals"]==restart["finals"]&&first["finals"]==last["finals"],
+            "held_release":held,"held_cancel":held_cancel,"immediate_release":quick_release,"silence_has_no_text":silence,
             "initial_load":initial,"replay":first,"cancel_after_partial":cancelled,"restart":restart,
-            "turbo_load":turbo_load,"turbo_benchmark":turbo,"xasr_reload":reload,"after_switch_replay":last}),
+            "benchmark":benchmark,"continuous_two_utterances":continuous,"native_endpoint_splits":endpoints,"reload":reload,"after_reload_replay":last}),
         )
     })();
     let _ = worker.tx.send(Command::Quit);

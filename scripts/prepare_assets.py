@@ -1,8 +1,7 @@
-"""Prepare both supported model engines; retired files are left untouched."""
+"""Prepare the X-ASR model and CPU runtime used by this release."""
 from check_licenses import license_materials
 from prepare_xasr import main as xasr
-from prepare_whisper import main as whisper
-if __name__=="__main__":
- license_materials()
- xasr()
- whisper()
+
+if __name__ == "__main__":
+    license_materials()
+    xasr()

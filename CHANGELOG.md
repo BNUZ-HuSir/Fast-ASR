@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5 — 2026-10-27
+
+- Only X-ASR-zh-en 480 ms INT8 is active and bundled; remove Whisper and Silero runtime dependencies from the application and default setup.
+- Feed audio directly into X-ASR with native endpoint detection; retain streaming previews during held recording and commit on release.
+- Enable Ctrl hold (300 ms) for first use, retaining explicit existing shortcut preferences and migrating retired model IDs.
+- Simplify settings to microphone and shortcut, add developer credit Elza, and give the pin icon a rounded, accent-selected button.
+- Verify multi-utterance endpoints, silence, release/cancel/restart, focus, clipboard recovery and simplified settings; shrink the offline package.
+
+
 ## 0.3.4 — 2026-10-27
 
 - 长按录音改为单独按住左/右 Ctrl 0.3 秒触发，松开后填写；短按与 Ctrl 组合键转发，组合键或 Esc 取消本次草稿。

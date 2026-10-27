@@ -27,7 +27,7 @@ struct Online {
     const SherpaOnnxOnlineRecognizer* recognizer=nullptr;
     const SherpaOnnxOnlineStream* stream=nullptr;
     std::string encoder,decoder,joiner,tokens;
-    int threads=4,silence_ms=0;
+    int threads=4,silence_ms=600;
     #define DECLARE(name) decltype(&name) name=nullptr;
     ONLINE_APIS(DECLARE)
     #undef DECLARE

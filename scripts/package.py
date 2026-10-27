@@ -43,24 +43,15 @@ def main():
         files[dest.as_posix()] = {"bytes": target.stat().st_size, "sha256": digest(target)}
 
     copy(executable, "FastASR.exe")
-    for name in ["whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll"]:
-        copy(ROOT / "vendor/runtime/whisper-1.9.5-win-x64-cpu" / name, Path("runtime/whisper") / name)
     xasr = json.loads((ROOT / "assets/xasr-manifest.json").read_text(encoding="utf-8"))
     for name in ["sherpa-onnx-c-api.dll", "onnxruntime.dll", "onnxruntime_providers_shared.dll"]:
         copy(ROOT / "vendor/runtime" / xasr["runtime"]["directory"] / "lib" / name, Path("runtime/sherpa") / name)
-    whisper = json.loads((ROOT / "assets/whisper-manifest.json").read_text(encoding="utf-8"))
-    for manifest, base, destination in [(xasr, ROOT / "vendor/models" / xasr["directory"], "models/xasr-480ms"), (whisper, ROOT / "vendor/models/whisper", "models")]:
-        for file in manifest["files"]:
-            src = base / file["name"]
-            if src.stat().st_size != file["bytes"] or digest(src) != file["sha256"]:
-                raise RuntimeError("Model hash mismatch: " + str(src))
-            copy(src, Path(destination) / file["name"])
-    vad = ROOT / "vendor/models/vad/ggml-silero-v5.1.2.bin"
-    if digest(vad) != "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf":
-        raise RuntimeError("VAD hash mismatch")
-    copy(vad, "models/vad/ggml-silero-v5.1.2.bin")
-    for name in ["whisper-manifest.json", "xasr-manifest.json"]:
-        copy(Path("assets") / name, Path("models") / name)
+    for file in xasr["files"]:
+        src = ROOT / "vendor/models" / xasr["directory"] / file["name"]
+        if src.stat().st_size != file["bytes"] or digest(src) != file["sha256"]:
+            raise RuntimeError("Model hash mismatch: " + str(src))
+        copy(src, Path("models/xasr-480ms") / file["name"])
+    copy("assets/xasr-manifest.json", "models/xasr-manifest.json")
     for file in (ROOT / "vendor/samples/asr").glob("*.wav"):
         copy(file, Path("samples") / file.name)
     for name in ["README.md", "LICENSE", "CHANGELOG.md"]:
@@ -79,13 +70,13 @@ def main():
     inventory_path = ROOT / ".build/rust-dependencies.json"
     inventory_path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
     copy(inventory_path, "licenses/rust-dependencies.json")
-    for name in ["architecture.md", "usage.md", "validation.md", "release-review-0.3.1.md", "release-review-0.3.2.md", "release-review-0.3.3.md", "release-review-0.3.4.md"]:
+    for name in ["architecture.md", "usage.md", "validation.md", "release-review-0.3.1.md", "release-review-0.3.2.md", "release-review-0.3.3.md", "release-review-0.3.4.md", "release-review-0.3.5.md"]:
         copy(Path("docs") / name, Path("docs") / name)
     for file in (ROOT / "docs/images").glob("*.png"):
         copy(file, Path("docs/images") / file.name)
     for file in reports:
         copy(file, Path("docs/test-results") / file.name)
-    info = {"version": VERSION, "default": "x-asr-zh-en-480ms", "models": ["x-asr-zh-en-480ms", "whisper-large-v3-turbo-q5_0"], "cpu_only": True,
+    info = {"version": VERSION, "default": "x-asr-zh-en-480ms", "models": ["x-asr-zh-en-480ms"], "external_vad": False, "developer": "Elza", "first_use_shortcut": "Ctrl hold 300 ms", "cpu_only": True,
             "desktop_regressions_verified": all((report_dir / name) in reports for name in UI_REPORT_NAMES), "executable_sha256": executable_hash, "files": files}
     (out / "build-info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
     archive = ROOT / "dist" / (NAME + ".zip")

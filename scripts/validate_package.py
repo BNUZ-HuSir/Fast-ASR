@@ -30,14 +30,18 @@ def main():
                     hashes = False
         checks["portable_hashes"] = hashes
         checks["default_xasr"] = info["default"] == "x-asr-zh-en-480ms"
-        required = ["models/xasr-480ms/encoder.int8.onnx", "models/xasr-480ms/decoder.onnx", "models/xasr-480ms/joiner.int8.onnx", "models/ggml-large-v3-turbo-q5_0.bin", "LICENSE"]
-        checks["both_models_and_license"] = all(NAME + "/" + name in bundle.namelist() for name in required)
+        required = ["models/xasr-480ms/encoder.int8.onnx", "models/xasr-480ms/decoder.onnx", "models/xasr-480ms/joiner.int8.onnx", "LICENSE"]
+        checks["xasr_and_license"] = all(NAME + "/" + name in bundle.namelist() for name in required)
         checks["upstream_notices_and_disclosures"] = all(
             NAME + "/" + relative.as_posix() in bundle.namelist()
             and hashlib.sha256(bundle.read(NAME + "/" + relative.as_posix())).hexdigest() == digest(source)
             for source, relative in notices
         )
-        checks["retired_weights_absent"] = not any("ggml-small" in name or "2023-02-" in name for name in bundle.namelist())
+        checks["only_xasr_model"] = info["models"] == ["x-asr-zh-en-480ms"]
+        checks["retired_weights_and_runtimes_absent"] = not any("ggml-" in name or "/models/vad/" in name or "/runtime/whisper/" in name or "2023-02-" in name for name in bundle.namelist())
+        checks["vad_removed"] = info["external_vad"] is False
+        checks["developer_credit"] = info["developer"] == "Elza"
+        checks["default_ctrl_hold"] = info["first_use_shortcut"] == "Ctrl hold 300 ms"
         checks["no_user_history_bundled"] = not any(name.startswith((NAME + "/data/", NAME + "/reports/")) for name in bundle.namelist())
         for name in bundle.namelist():
             if not (destination / name).resolve().is_relative_to(destination.resolve()):
@@ -45,7 +49,7 @@ def main():
         bundle.extractall(destination)
     with zipfile.ZipFile(ROOT / "dist" / f"FastASR-{VERSION}-source.zip") as bundle:
         checks["source_crc"] = bundle.testzip() is None
-        required = ["LICENSE", "Cargo.lock", "src/xasr_bridge.cpp", "scripts/prepare_assets.py", "scripts/verify.ps1", "scripts/prepare_whisper.py", ".github/workflows/windows.yml", "vendor/samples/asr/46.wav"]
+        required = ["LICENSE", "Cargo.lock", "src/xasr_bridge.cpp", "scripts/prepare_assets.py", "scripts/verify.ps1", "scripts/prepare_xasr.py", "scripts/asset_download.py", ".github/workflows/windows.yml", "vendor/samples/asr/46.wav"]
         required += ["scripts/check_licenses.py", "vendor/licenses/SOURCES.json", "docs/LEGAL.md", "docs/sample-provenance.md"]
         checks["source_notices_and_disclosures"] = all(
             source.relative_to(ROOT).as_posix() in bundle.namelist()

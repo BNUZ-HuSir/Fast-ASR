@@ -14,7 +14,6 @@ body:
       label: 当前模型
       options:
         - X-ASR 480 ms INT8
-        - Whisper Large-v3-Turbo Q5
     validations:
       required: true
   - type: textarea

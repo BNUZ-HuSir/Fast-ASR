@@ -2,7 +2,7 @@ use crate::{
     assets::{self, ModelKind, Paths},
     audio::Recorder,
     config::Settings,
-    engine::{Decoder, Segmenter, TextEvent},
+    engine::{Decoder, TextEvent},
 };
 use std::{
     path::PathBuf,
@@ -20,7 +20,6 @@ pub enum Command {
     Stop,
     Cancel,
     Retry,
-    Switch(ModelKind),
     Benchmark,
     Quit,
     Replay(Settings, Vec<f32>),
@@ -35,7 +34,6 @@ pub enum Event {
     Partial(String),
     Final(String),
     Level(f32),
-    Vad { probability: f32, speech: bool },
     Captured(u64),
     Error(String),
     LoadFailed(String),
@@ -48,7 +46,6 @@ pub struct Worker {
 enum Task {
     Load(Paths),
     Begin(u32),
-    Decode(Vec<f32>),
     Frame(Vec<f32>),
     Finish,
     Stop,
@@ -111,7 +108,7 @@ impl Capture {
 }
 fn enqueue(tasks: &Sender<(u64, Task)>, queued: &AtomicUsize, id: u64, task: Task) {
     let count = match &task {
-        Task::Decode(a) | Task::Frame(a) => a.len(),
+        Task::Frame(a) => a.len(),
         _ => 0,
     };
     queued.fetch_add(count, Ordering::Relaxed);
@@ -119,58 +116,23 @@ fn enqueue(tasks: &Sender<(u64, Task)>, queued: &AtomicUsize, id: u64, task: Tas
         queued.fetch_sub(count, Ordering::Relaxed);
     }
 }
-fn feed_chunks(
-    chunks: Vec<Vec<f32>>,
-    segmenter: &mut Option<Segmenter>,
-    tasks: &Sender<(u64, Task)>,
-    queued: &AtomicUsize,
-    id: u64,
-) -> Result<(), String> {
-    if let Some(v) = segmenter {
-        for chunk in chunks {
-            if v.streaming {
-                let (audio, ended) = v.feed_stream(&chunk)?;
-                if !audio.is_empty() {
-                    enqueue(tasks, queued, id, Task::Frame(audio));
-                }
-                if ended {
-                    enqueue(tasks, queued, id, Task::Finish);
-                    enqueue(tasks, queued, id, Task::Begin(0));
-                }
-            } else if let Some(audio) = v.feed(&chunk)? {
-                enqueue(tasks, queued, id, Task::Decode(audio));
-            }
-        }
+fn feed_chunks(chunks: Vec<Vec<f32>>, tasks: &Sender<(u64, Task)>, queued: &AtomicUsize, id: u64) {
+    for chunk in chunks {
+        enqueue(tasks, queued, id, Task::Frame(chunk));
     }
-
-    Ok(())
 }
 fn finish_capture(
     capture: &mut Option<Capture>,
-    segmenter: &mut Option<Segmenter>,
     tasks: &Sender<(u64, Task)>,
     queued: &AtomicUsize,
     id: u64,
     events: &Sender<Event>,
-) -> Result<(), String> {
+) {
     if let Some(mut source) = capture.take() {
-        feed_chunks(source.stop_chunks(), segmenter, tasks, queued, id)?;
+        feed_chunks(source.stop_chunks(), tasks, queued, id);
         let _ = events.send(Event::Captured(source.sample_count()));
-        if let Some(v) = segmenter {
-            if v.streaming {
-                let audio = v.finish_stream();
-                if !audio.is_empty() {
-                    enqueue(tasks, queued, id, Task::Frame(audio));
-                }
-                enqueue(tasks, queued, id, Task::Finish);
-            } else if let Some(audio) = v.finish() {
-                enqueue(tasks, queued, id, Task::Decode(audio));
-            }
-        } else {
-            enqueue(tasks, queued, id, Task::Finish);
-        }
+        enqueue(tasks, queued, id, Task::Finish);
     }
-    Ok(())
 }
 impl Worker {
     pub fn spawn(home: PathBuf, initial_model: ModelKind) -> Self {
@@ -190,7 +152,7 @@ impl Worker {
                         break;
                     }
                     let sample_count = match &task {
-                        Task::Decode(a) | Task::Frame(a) => a.len(),
+                        Task::Frame(a) => a.len(),
                         _ => 0,
                     };
                     if id != gen_infer.load(Ordering::Acquire) {
@@ -214,18 +176,6 @@ impl Worker {
                             .and_then(|d| d.begin(silence))
                         {
                             Ok(()) => continue,
-                            Err(e) => Reply::Error(e),
-                        },
-                        Task::Decode(audio) => match decoder
-                            .as_mut()
-                            .ok_or_else(|| "模型尚未加载".to_string())
-                            .and_then(|d| d.transcribe(&audio))
-                        {
-                            Ok(s) => Reply::Text(if s.is_empty() {
-                                Vec::new()
-                            } else {
-                                vec![TextEvent::Final(s)]
-                            }),
                             Err(e) => Reply::Error(e),
                         },
                         Task::Frame(audio) => match decoder
@@ -261,18 +211,15 @@ impl Worker {
                     }
                 }
             });
-            let mut selected = initial_model;
-            let mut switch_after_stop = None;
+            let selected = initial_model;
             let mut needs_load = true;
             let mut ready = false;
-            let mut segmenter: Option<Segmenter> = None;
             let mut capture: Option<Capture> = None;
             let mut held_capture = false;
             let mut stopping = false;
             let mut last_audio = Instant::now();
             let mut level_time = Instant::now();
             let mut count_time = Instant::now();
-            let mut vad_time = Instant::now();
             loop {
                 if needs_load {
                     needs_load = false;
@@ -283,18 +230,6 @@ impl Worker {
                     let id = generation.load(Ordering::Acquire);
                     match assets::ensure(&home, selected, |s| {
                         let _ = events.send(Event::Loading(s));
-                    })
-                    .and_then(|p| {
-                        // Both models share the same VAD. Keep its DLLs loaded across
-                        // switches: ggml installs a process terminate handler on load,
-                        // and unloading/reloading it can leave that handler dangling.
-                        if let Some(v) = segmenter.as_mut() {
-                            v.streaming = p.kind.streaming();
-                            v.reset(600);
-                        } else {
-                            segmenter = Some(Segmenter::new(&p)?);
-                        }
-                        Ok(p)
                     }) {
                         Ok(p) => enqueue(&tasks, &queued, id, Task::Load(p)),
                         Err(e) => {
@@ -322,13 +257,7 @@ impl Worker {
                         }
                         Reply::Stopped => {
                             stopping = false;
-                            if let Some(kind) = switch_after_stop.take() {
-                                selected = kind;
-                                generation.fetch_add(1, Ordering::AcqRel);
-                                needs_load = true;
-                            } else {
-                                let _ = events.send(Event::Stopped);
-                            }
+                            let _ = events.send(Event::Stopped);
                         }
                         Reply::LoadFailed(e) => {
                             ready = false;
@@ -341,10 +270,6 @@ impl Worker {
                             generation.fetch_add(1, Ordering::AcqRel);
                             let _ = events.send(Event::Partial(String::new()));
                             let _ = events.send(Event::Error(e));
-                            if let Some(kind) = switch_after_stop.take() {
-                                selected = kind;
-                                needs_load = true;
-                            }
                         }
                         Reply::Benchmarked(v) => {
                             let _ = events.send(Event::Benchmarked(v));
@@ -363,31 +288,15 @@ impl Worker {
                         generation.fetch_add(1, Ordering::AcqRel);
                         needs_load = true;
                     }
-                    Ok(Command::Switch(kind)) => {
-                        let id = generation.load(Ordering::Acquire);
-                        if let Err(e) = finish_capture(
-                            &mut capture,
-                            &mut segmenter,
-                            &tasks,
-                            &queued,
-                            id,
-                            &events,
-                        ) {
-                            let _ = events.send(Event::Error(e));
-                        }
-                        switch_after_stop = Some(kind);
-                        stopping = true;
-                        enqueue(&tasks, &queued, id, Task::Stop);
-                    }
                     Ok(
                         command @ (Command::Start(_)
                         | Command::StartHeld(_)
                         | Command::Replay(..)
                         | Command::ReplayHeld(..)),
-                    ) if ready && capture.is_none() && !stopping && switch_after_stop.is_none() => {
+                    ) if ready && capture.is_none() && !stopping => {
                         let held =
                             matches!(command, Command::StartHeld(_) | Command::ReplayHeld(..));
-                        let (mut settings, source) = match command {
+                        let (_settings, source) = match command {
                             Command::Start(settings) | Command::StartHeld(settings) => {
                                 let source = Recorder::open(settings.microphone).map(Capture::Live);
                                 (settings, source)
@@ -403,18 +312,14 @@ impl Worker {
                             ),
                             _ => unreachable!(),
                         };
-                        settings.normalize();
                         match source {
                             Ok(source) => {
                                 held_capture = held;
-                                if let Some(v) = segmenter.as_mut() {
-                                    v.configure(&settings);
-                                }
                                 enqueue(
                                     &tasks,
                                     &queued,
                                     generation.load(Ordering::Acquire),
-                                    Task::Begin(0),
+                                    Task::Begin(600),
                                 );
                                 capture = Some(source);
                                 last_audio = Instant::now();
@@ -427,16 +332,7 @@ impl Worker {
                     }
                     Ok(Command::Stop) => {
                         let id = generation.load(Ordering::Acquire);
-                        if let Err(e) = finish_capture(
-                            &mut capture,
-                            &mut segmenter,
-                            &tasks,
-                            &queued,
-                            id,
-                            &events,
-                        ) {
-                            let _ = events.send(Event::Error(e));
-                        }
+                        finish_capture(&mut capture, &tasks, &queued, id, &events);
                         stopping = true;
                         enqueue(&tasks, &queued, id, Task::Stop);
                     }
@@ -444,20 +340,11 @@ impl Worker {
                         capture = None;
                         held_capture = false;
                         stopping = false;
-                        switch_after_stop = None;
                         generation.fetch_add(1, Ordering::AcqRel);
-                        if let Some(v) = segmenter.as_mut() {
-                            v.reset(600);
-                        }
                         let _ = events.send(Event::Partial(String::new()));
                         let _ = events.send(Event::Stopped);
                     }
-                    Ok(Command::Benchmark)
-                        if ready
-                            && capture.is_none()
-                            && !stopping
-                            && switch_after_stop.is_none() =>
-                    {
+                    Ok(Command::Benchmark) if ready && capture.is_none() && !stopping => {
                         enqueue(
                             &tasks,
                             &queued,
@@ -483,26 +370,14 @@ impl Worker {
                                 let _ = events.send(Event::Level(level));
                                 level_time = Instant::now();
                             }
-                            if let Err(e) = feed_chunks(
+                            feed_chunks(
                                 chunks,
-                                &mut segmenter,
                                 &tasks,
                                 &queued,
                                 generation.load(Ordering::Acquire),
-                            ) {
-                                failure = Some(e);
-                            }
+                            );
                         }
                         Err(e) => failure = Some(e),
-                    }
-                    if vad_time.elapsed() >= Duration::from_millis(70) {
-                        if let Some(v) = segmenter.as_ref() {
-                            let _ = events.send(Event::Vad {
-                                probability: v.probability,
-                                speech: v.speech_detected(),
-                            });
-                        }
-                        vad_time = Instant::now();
                     }
                     if count_time.elapsed() >= Duration::from_millis(200) {
                         let _ = events.send(Event::Captured(source.sample_count()));
@@ -521,15 +396,11 @@ impl Worker {
                     let _ = events.send(Event::Partial(String::new()));
                     let _ = events.send(Event::Error(e));
                 }
-                let limit = 16000 * if selected.streaming() { 10 } else { 90 };
+                let limit = 16000 * 10;
                 let overloaded = capture.is_some() && queued.load(Ordering::Relaxed) >= limit;
                 if ended || overloaded {
                     let id = generation.load(Ordering::Acquire);
-                    if let Err(e) =
-                        finish_capture(&mut capture, &mut segmenter, &tasks, &queued, id, &events)
-                    {
-                        let _ = events.send(Event::Error(e));
-                    }
+                    finish_capture(&mut capture, &tasks, &queued, id, &events);
                     stopping = true;
                     enqueue(&tasks, &queued, id, Task::Stop);
                     if overloaded {

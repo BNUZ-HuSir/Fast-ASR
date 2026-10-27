@@ -1,5 +1,4 @@
 use crate::{
-    assets::ModelKind,
     audio,
     config::Settings,
     hotkey::{self, CtrlHotkey},
@@ -60,8 +59,6 @@ pub struct App {
     transcript: String,
     partial: String,
     held_text: String,
-    vad_probability: f32,
-    vad_speech: bool,
     notice: String,
     level: f32,
     scale: f32,
@@ -69,11 +66,7 @@ pub struct App {
     icon: HICON,
     devices: Vec<(u32, String)>,
     mic_combo: HWND,
-    model_combo: HWND,
-    pause_combo: HWND,
     hotkey_mode_combo: HWND,
-    vad_combo: HWND,
-    min_speech_combo: HWND,
     hotkey_registered: bool,
     ctrl_hotkey: Option<CtrlHotkey>,
     probe_stage: Option<u32>,
@@ -131,10 +124,10 @@ impl App {
         }
         if self.listening {
             return (
-                if self.vad_speech {
-                    "检测到语音"
+                if self.hold_pressed {
+                    "按住录音中"
                 } else {
-                    "等待语音"
+                    "录音中"
                 },
                 TEAL,
             );
@@ -196,8 +189,6 @@ impl App {
             self.notice = "按住时实时预览，松开后填写 · Esc 取消".into();
         }
         self.held_text.clear();
-        self.vad_probability = 0.;
-        self.vad_speech = false;
         self.hold_pressed = held;
         self.start_pending = true;
         self.stop_pending = false;
@@ -339,10 +330,10 @@ impl App {
                 Event::Ready => {
                     self.ready = true;
                     self.busy = false;
-                    self.notice = if self.settings.model.streaming() {
-                        "先点击输入框，再点麦克风开始"
+                    self.notice = if self.settings.hotkey && self.settings.hotkey_hold {
+                        "点击输入框，长按 Ctrl 0.3 秒开始 · 松开填写"
                     } else {
-                        "Turbo CPU 识别较慢 · 点击麦克风开始"
+                        "先点击输入框，再点麦克风开始"
                     }
                     .into();
                 }
@@ -384,13 +375,6 @@ impl App {
                         self.paused = true;
                         self.notice = "待填写文字较多，已暂停录音，请先复制或填写".into();
                     }
-                }
-                Event::Vad {
-                    probability,
-                    speech,
-                } => {
-                    self.vad_probability = probability;
-                    self.vad_speech = speech;
                 }
                 Event::Captured(_) => {}
                 Event::Level(level) => {
@@ -459,11 +443,32 @@ impl App {
                     let noactivate =
                         SendMessageW(self.hwnd, WM_MOUSEACTIVATE, 0, 0) == MA_NOACTIVATE as isize;
                     let settings_opened = !self.settings_hwnd.is_null();
+                    let mut credit = [0u16; 64];
+                    let count = GetWindowTextW(
+                        GetDlgItem(self.settings_hwnd, 107),
+                        credit.as_mut_ptr(),
+                        credit.len() as i32,
+                    );
+                    let credit_ok = String::from_utf16_lossy(&credit[..count.max(0) as usize])
+                        == "开发者：Elza";
+                    let selected = SendMessageW(self.hotkey_mode_combo, CB_GETCURSEL, 0, 0);
+                    let shortcut_ok = selected
+                        == if !self.settings.hotkey {
+                            0
+                        } else if self.settings.hotkey_hold {
+                            1
+                        } else {
+                            2
+                        };
+                    let simplified = [100, 102, 105, 106]
+                        .into_iter()
+                        .all(|id| GetDlgItem(self.settings_hwnd, id).is_null());
+                    let settings_check = serde_json::json!({"passed":credit_ok&&shortcut_ok&&simplified,"developer_credit":credit_ok,"shortcut_selection_matches_preferences":shortcut_ok,"no_model_or_vad_selectors":simplified,"first_use_ctrl_hold":Settings::default().hotkey&&Settings::default().hotkey_hold});
                     // Keep the foreground settings window alive while the test host
                     // is activated; destroying it first hands focus to another app.
                     let regression = self.regression_probe();
                     DestroyWindow(self.settings_hwnd);
-                    let report = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":crate::diagnostics::executable_sha256().unwrap_or_default(),"passed":noactivate&&settings_opened&&regression["passed"]==true&&self.probe_benchmark.as_ref().is_some_and(|v|v["passed"]==true),"non_activating_overlay":noactivate,"settings_opened":settings_opened,"regressions":regression,"memory_with_settings":crate::diagnostics::memory(),"recognition_sample":self.probe_benchmark});
+                    let report = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":crate::diagnostics::executable_sha256().unwrap_or_default(),"passed":noactivate&&settings_opened&&settings_check["passed"]==true&&regression["passed"]==true&&self.probe_benchmark.as_ref().is_some_and(|v|v["passed"]==true),"non_activating_overlay":noactivate,"settings_opened":settings_opened,"settings":settings_check,"regressions":regression,"memory_with_settings":crate::diagnostics::memory(),"recognition_sample":self.probe_benchmark});
                     let _ = std::fs::write(
                         self.home.join("reports/ui-probe.json"),
                         serde_json::to_vec_pretty(&report).unwrap(),
@@ -714,7 +719,7 @@ impl App {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 size(480),
-                size(630),
+                size(370),
                 self.hwnd,
                 null_mut(),
                 instance,
@@ -740,35 +745,14 @@ impl App {
                     SendMessageW(control, WM_SETFONT, self.fonts[3] as usize, 1);
                     control
                 };
-            child("STATIC", "识别模型", 0, 24, 22, 100, 24, 0);
-            self.model_combo = child(
-                "COMBOBOX",
-                "",
-                CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
-                24,
-                48,
-                390,
-                180,
-                100,
-            );
-            for kind in ModelKind::ALL {
-                SendMessageW(
-                    self.model_combo,
-                    CB_ADDSTRING,
-                    0,
-                    wide(kind.label()).as_ptr() as isize,
-                );
-                if kind == self.settings.model {
-                    SendMessageW(self.model_combo, CB_SETCURSEL, kind as usize, 0);
-                }
-            }
-            child("STATIC", "麦克风", 0, 24, 90, 100, 24, 0);
+            child("STATIC", "X-ASR · 中英文流式识别", 0, 24, 22, 390, 24, 0);
+            child("STATIC", "麦克风", 0, 24, 64, 100, 24, 0);
             self.mic_combo = child(
                 "COMBOBOX",
                 "",
                 CBS_DROPDOWNLIST as u32 | WS_TABSTOP | WS_VSCROLL,
                 24,
-                116,
+                90,
                 390,
                 180,
                 101,
@@ -787,124 +771,13 @@ impl App {
                 }
             }
             SendMessageW(self.mic_combo, CB_SETCURSEL, selection, 0);
-            child("STATIC", "停顿多久后填写", 0, 24, 158, 180, 24, 0);
-            self.pause_combo = child(
-                "COMBOBOX",
-                "",
-                CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
-                24,
-                184,
-                390,
-                130,
-                102,
-            );
-            for label in ["快速 · 400 毫秒", "标准 · 600 毫秒", "宽松 · 1000 毫秒"] {
-                SendMessageW(
-                    self.pause_combo,
-                    CB_ADDSTRING,
-                    0,
-                    wide(label).as_ptr() as isize,
-                );
-            }
-            let selection = if self.settings.silence_ms <= 450 {
-                0
-            } else if self.settings.silence_ms >= 900 {
-                2
-            } else {
-                1
-            };
-            SendMessageW(self.pause_combo, CB_SETCURSEL, selection, 0);
-            child(
-                "STATIC",
-                "VAD 语音阈值 · 越低越敏感",
-                0,
-                24,
-                224,
-                400,
-                24,
-                0,
-            );
-            self.vad_combo = child(
-                "COMBOBOX",
-                "",
-                CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
-                24,
-                250,
-                390,
-                200,
-                105,
-            );
-            for label in [
-                "0.2 · 最敏感",
-                "0.3 · 高灵敏度",
-                "0.4 · 较敏感",
-                "0.5 · 标准（推荐）",
-                "0.6 · 较严格",
-                "0.7 · 严格",
-                "0.8 · 最严格",
-            ] {
-                SendMessageW(
-                    self.vad_combo,
-                    CB_ADDSTRING,
-                    0,
-                    wide(label).as_ptr() as isize,
-                );
-            }
-            SendMessageW(
-                self.vad_combo,
-                CB_SETCURSEL,
-                ((self.settings.vad_threshold * 10.).round() as usize)
-                    .saturating_sub(2)
-                    .min(6),
-                0,
-            );
-            child(
-                "STATIC",
-                "VAD 最短语音 · 过滤短促杂音",
-                0,
-                24,
-                292,
-                400,
-                24,
-                0,
-            );
-            self.min_speech_combo = child(
-                "COMBOBOX",
-                "",
-                CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
-                24,
-                318,
-                390,
-                160,
-                106,
-            );
-            for label in [
-                "64 毫秒 · 短词更容易触发",
-                "128 毫秒 · 标准（推荐）",
-                "256 毫秒 · 过滤更多短音",
-                "512 毫秒 · 严格过滤",
-            ] {
-                SendMessageW(
-                    self.min_speech_combo,
-                    CB_ADDSTRING,
-                    0,
-                    wide(label).as_ptr() as isize,
-                );
-            }
-            let selection = match self.settings.vad_min_speech_ms {
-                0..=64 => 0,
-                65..=128 => 1,
-                129..=256 => 2,
-                _ => 3,
-            };
-            SendMessageW(self.min_speech_combo, CB_SETCURSEL, selection, 0);
-            child("STATIC", "全局快捷键", 0, 24, 360, 400, 24, 0);
+            child("STATIC", "全局快捷键", 0, 24, 132, 390, 24, 0);
             self.hotkey_mode_combo = child(
                 "COMBOBOX",
                 "",
                 CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
                 24,
-                386,
+                158,
                 390,
                 160,
                 103,
@@ -931,20 +804,21 @@ impl App {
             SendMessageW(self.hotkey_mode_combo, CB_SETCURSEL, selection, 0);
             child(
                 "STATIC",
-                "VAD 随录音工作，不会自行开启麦克风。\nCtrl 长按 0.3 秒开始，松开填写；Esc 取消。\nX-ASR 实时预览，Turbo 分段识别；最长 60 秒。",
+                "按住实时预览，松开填写；Esc 取消。\n也可点击麦克风，开始或停止连续输入。",
                 0,
                 24,
-                430,
+                202,
                 420,
-                72,
+                44,
                 0,
             );
+            child("STATIC", "开发者：Elza", 0, 24, 277, 220, 24, 107);
             child(
                 "BUTTON",
                 "保存",
                 BS_DEFPUSHBUTTON as u32 | WS_TABSTOP,
                 314,
-                520,
+                272,
                 100,
                 32,
                 104,
@@ -954,45 +828,21 @@ impl App {
         }
     }
     fn save_settings(&mut self) {
-        let previous_model = self.settings.model;
         unsafe {
-            let model = SendMessageW(self.model_combo, CB_GETCURSEL, 0, 0);
-            self.settings.model = ModelKind::ALL
-                .get(model.max(0) as usize)
-                .copied()
-                .unwrap_or(ModelKind::XAsr480);
             let mic = SendMessageW(self.mic_combo, CB_GETCURSEL, 0, 0);
             if mic >= 0
                 && let Some((id, _)) = self.devices.get(mic as usize)
             {
                 self.settings.microphone = *id;
             }
-            self.settings.silence_ms = match SendMessageW(self.pause_combo, CB_GETCURSEL, 0, 0) {
-                0 => 400,
-                2 => 1000,
-                _ => 600,
-            };
             let mode = SendMessageW(self.hotkey_mode_combo, CB_GETCURSEL, 0, 0);
             self.settings.hotkey = mode > 0;
             self.settings.hotkey_hold = mode == 1;
-            self.settings.vad_threshold =
-                (SendMessageW(self.vad_combo, CB_GETCURSEL, 0, 0).clamp(0, 6) as f32 + 2.) / 10.;
-            self.settings.vad_min_speech_ms =
-                match SendMessageW(self.min_speech_combo, CB_GETCURSEL, 0, 0) {
-                    0 => 64,
-                    2 => 256,
-                    3 => 512,
-                    _ => 128,
-                };
-            self.settings.normalize();
         }
         self.set_hotkey();
         match self.settings.save(&self.home) {
             Ok(()) => {
                 self.notice = "设置已保存".into();
-                if self.settings.model != previous_model {
-                    self.switch_model(self.settings.model);
-                }
                 unsafe {
                     DestroyWindow(self.settings_hwnd);
                 }
@@ -1170,64 +1020,6 @@ impl App {
             }
         }
     }
-    fn switch_model(&mut self, kind: ModelKind) {
-        self.settle_held_text(false);
-        self.hold_pressed = false;
-        self.start_pending = false;
-        self.stop_pending = false;
-        self.settings.model = kind;
-        let _ = self.settings.save(&self.home);
-        self.ready = false;
-        self.busy = true;
-        self.listening = false;
-        self.level = 0.;
-        unsafe {
-            UnregisterHotKey(self.hwnd, ESCAPE_HOTKEY);
-        }
-        self.notice = format!("正在切换 {}…", kind.label());
-        let _ = self.worker.tx.send(Command::Switch(kind));
-    }
-    fn model_menu(&mut self) {
-        if self.busy {
-            return;
-        }
-        unsafe {
-            let menu = CreatePopupMenu();
-            for (i, kind) in ModelKind::ALL.into_iter().enumerate() {
-                AppendMenuW(
-                    menu,
-                    MF_STRING
-                        | if kind == self.settings.model {
-                            MF_CHECKED
-                        } else {
-                            0
-                        },
-                    i + 1,
-                    wide(kind.label()).as_ptr(),
-                );
-            }
-            let mut p: POINT = zeroed();
-            GetCursorPos(&mut p);
-            let id = TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                p.x,
-                p.y,
-                0,
-                self.hwnd,
-                null(),
-            ) as usize;
-            DestroyMenu(menu);
-            if let Some(kind) = id
-                .checked_sub(1)
-                .and_then(|i| ModelKind::ALL.get(i))
-                .copied()
-                && kind != self.settings.model
-            {
-                self.switch_model(kind);
-            }
-        }
-    }
     fn draw(&self, dc: HDC, width: i32, height: i32) {
         unsafe {
             let memory = CreateCompatibleDC(dc);
@@ -1270,10 +1062,7 @@ impl App {
                 32,
                 DT_SINGLELINE,
             );
-            let model = match self.settings.model {
-                ModelKind::XAsr480 => "X-ASR · 流式 ▾",
-                ModelKind::WhisperTurboQ5 => "Turbo Q5 ▾",
-            };
+            let model = "X-ASR · 流式";
             text(
                 memory,
                 self.fonts[2],
@@ -1284,16 +1073,6 @@ impl App {
                 340,
                 32,
                 DT_SINGLELINE,
-            );
-            fill(
-                memory,
-                RECT {
-                    left: 344,
-                    top: 9,
-                    right: 400,
-                    bottom: 35,
-                },
-                if self.settings.topmost { PANEL } else { BG },
             );
             draw_pin(memory, self.settings.topmost);
             text(
@@ -1373,23 +1152,18 @@ impl App {
                 );
             }
             let subtitle = if self.listening {
-                format!(
-                    "VAD {:.2} / {:.2} · {}",
-                    self.vad_probability,
-                    self.settings.vad_threshold,
-                    if self.hold_pressed {
-                        "长按"
-                    } else {
-                        "连续"
-                    }
-                )
+                if self.hold_pressed {
+                    "松开 Ctrl 填写"
+                } else {
+                    "连续输入 · 点击停止"
+                }
             } else {
-                "中 / EN · 本地识别".into()
+                "中 / EN · 本地识别"
             };
             text(
                 memory,
                 self.fonts[2],
-                &subtitle,
+                subtitle,
                 MUTED,
                 98,
                 footer,
@@ -1446,30 +1220,34 @@ impl App {
 
 unsafe fn draw_pin(dc: HDC, pinned: bool) {
     unsafe {
+        // Rounded outline and tinted selected state keep the pin legible at small sizes.
         let color = if pinned { TEAL } else { MUTED };
-        let pen = CreatePen(PS_SOLID, 2, color);
-        let old_pen = SelectObject(dc, pen);
-        let brush = CreateSolidBrush(if pinned { color } else { BG });
-        let old_brush = SelectObject(dc, brush);
+        let border = CreatePen(PS_SOLID, 1, if pinned { TEAL } else { PANEL });
+        let old_pen = SelectObject(dc, border);
+        let background = CreateSolidBrush(if pinned { 0x003b3920 } else { PANEL });
+        let old_brush = SelectObject(dc, background);
+        RoundRect(dc, 354, 6, 390, 38, 12, 12);
+        let icon_pen = CreatePen(PS_SOLID, 2, color);
+        SelectObject(dc, icon_pen);
+        let icon_brush = CreateSolidBrush(if pinned { TEAL } else { PANEL });
+        SelectObject(dc, icon_brush);
         let points = [
-            POINT { x: 366, y: 13 },
-            POINT { x: 378, y: 13 },
-            POINT { x: 376, y: 19 },
-            POINT { x: 381, y: 24 },
-            POINT { x: 363, y: 24 },
-            POINT { x: 368, y: 19 },
+            POINT { x: 367, y: 13 },
+            POINT { x: 377, y: 13 },
+            POINT { x: 375, y: 19 },
+            POINT { x: 379, y: 24 },
+            POINT { x: 365, y: 24 },
+            POINT { x: 369, y: 19 },
         ];
         Polygon(dc, points.as_ptr(), points.len() as i32);
         MoveToEx(dc, 372, 24, null_mut());
         LineTo(dc, 372, 31);
-        if !pinned {
-            MoveToEx(dc, 361, 12, null_mut());
-            LineTo(dc, 383, 32);
-        }
         SelectObject(dc, old_brush);
         SelectObject(dc, old_pen);
-        DeleteObject(brush);
-        DeleteObject(pen);
+        DeleteObject(background);
+        DeleteObject(border);
+        DeleteObject(icon_brush);
+        DeleteObject(icon_pen);
     }
 }
 unsafe fn draw_record_icon(dc: HDC, recording: bool, processing: bool, color: u32) {
@@ -1610,8 +1388,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 let y = (((l >> 16) & 0xffff) as f32 / app.scale) as i32;
                 if (18..=82).contains(&x) && (48..=112).contains(&y) {
                     app.toggle();
-                } else if (225..=340).contains(&x) && y < 38 {
-                    app.model_menu();
                 } else if (344..=399).contains(&x) && y < 38 {
                     app.toggle_topmost();
                 } else if (403..=453).contains(&x) && y < 38 {
@@ -1794,20 +1570,14 @@ pub fn run(home: PathBuf, probe: bool) -> Result<(), String> {
             transcript: String::new(),
             partial: String::new(),
             held_text: String::new(),
-            vad_probability: 0.,
-            vad_speech: false,
             notice: "正在加载本地识别模型…".into(),
             level: 0.,
             scale,
             fonts,
             icon,
             devices: Vec::new(),
-            model_combo: null_mut(),
             mic_combo: null_mut(),
-            pause_combo: null_mut(),
             hotkey_mode_combo: null_mut(),
-            vad_combo: null_mut(),
-            min_speech_combo: null_mut(),
             hotkey_registered: false,
             ctrl_hotkey: None,
             probe_stage: if probe { Some(0) } else { None },
@@ -1912,7 +1682,9 @@ unsafe fn save_window(hwnd: HWND, path: &std::path::Path) -> Result<(), String> 
     unsafe {
         let dc = GetDC(hwnd);
         let mut rect: RECT = zeroed();
-        GetClientRect(hwnd, &mut rect);
+        GetWindowRect(hwnd, &mut rect);
+        rect.right -= rect.left;
+        rect.bottom -= rect.top;
         let memory = CreateCompatibleDC(dc);
         let bitmap = CreateCompatibleBitmap(dc, rect.right, rect.bottom);
         let old = SelectObject(memory, bitmap);
@@ -1920,7 +1692,7 @@ unsafe fn save_window(hwnd: HWND, path: &std::path::Path) -> Result<(), String> 
             hwnd,
             WM_PRINT,
             memory as usize,
-            (PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
+            (PRF_NONCLIENT | PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
         );
         let result = write_bitmap(memory, bitmap, rect.right, rect.bottom, path);
         SelectObject(memory, old);

@@ -60,7 +60,6 @@ jobs:
           path: |
             dist/*-source.zip
             reports/xasr-self-test.json
-            reports/turbo-self-test.json
             reports/pipeline-probe.json
             reports/package-integrity-*.json
           if-no-files-found: error

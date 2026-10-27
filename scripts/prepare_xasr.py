@@ -1,7 +1,7 @@
 """Prepare pinned bilingual X-ASR 480 ms model and native CPU runtime; no deletion."""
 from pathlib import Path
 import json, shutil, tarfile
-from prepare_whisper import fetch, sha
+from asset_download import fetch, sha
 ROOT=Path(__file__).resolve().parents[1]
 def extract(archive, destination):
  destination.mkdir(parents=True,exist_ok=True)
