@@ -2,7 +2,7 @@
 import hashlib
 import json
 import zipfile
-from release_common import ROOT, VERSION, NAME, digest
+from release_common import ROOT, VERSION, NAME, digest, REPORT_NAMES, UI_REPORT_NAMES
 from check_licenses import license_materials
 
 
@@ -22,6 +22,17 @@ def main():
         checks["portable_crc"] = bundle.testzip() is None
         info = json.loads(bundle.read(NAME + "/build-info.json"))
         checks["version"] = info["version"] == VERSION
+        checks["verification_disclosure"] = (
+            info["desktop_regressions_verified"] and not info["desktop_tests_pending"]
+            or info["release_channel"] == "preview" and bool(info["validation_limitations"])
+            and set(info["desktop_tests_pending"]) == set(UI_REPORT_NAMES))
+        checks["matching_verification_reports"] = all(
+            (lambda report: report.get("passed") is True and report.get("version") == VERSION
+             and report.get("executable_sha256") == info["executable_sha256"])(
+                 json.loads(bundle.read(NAME + "/docs/test-results/" + name)))
+            for name in REPORT_NAMES)
+        lifecycle = json.loads(bundle.read(NAME + "/docs/test-results/hook-lifecycle.json"))
+        checks["native_hook_shutdown"] = lifecycle.get("process_exit_signaled") is True and lifecycle.get("private_desktop") is True
         checks["exact_inventory"] = set(bundle.namelist()) == {NAME + "/" + name for name in [*info["files"], "build-info.json"]}
         hashes = True
         for name, record in info["files"].items():
@@ -41,7 +52,7 @@ def main():
         checks["retired_weights_and_runtimes_absent"] = not any("ggml-" in name or "/models/vad/" in name or "/runtime/whisper/" in name or "2023-02-" in name for name in bundle.namelist())
         checks["vad_removed"] = info["external_vad"] is False
         checks["developer_credit"] = info["developer"] == "Elza"
-        checks["default_ctrl_hold"] = info["first_use_shortcut"] == "Ctrl hold 300 ms"
+        checks["default_left_alt_hold"] = info["first_use_shortcut"] == "Left Alt hold 500 ms"
         checks["no_user_history_bundled"] = not any(name.startswith((NAME + "/data/", NAME + "/reports/")) for name in bundle.namelist())
         for name in bundle.namelist():
             if not (destination / name).resolve().is_relative_to(destination.resolve()):

@@ -61,6 +61,7 @@ jobs:
             dist/*-source.zip
             reports/xasr-self-test.json
             reports/pipeline-probe.json
+            reports/hook-lifecycle.json
             reports/package-integrity-*.json
           if-no-files-found: error
           retention-days: 14

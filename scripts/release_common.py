@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = re.search(r"(?ms)^\[package\]\s*\n(.*?)(?=^\[|\Z)", (ROOT / "Cargo.toml").read_text(encoding="utf-8")).group(1)
 VERSION = re.search(r'(?m)^version\s*=\s*"([^"]+)"', PACKAGE).group(1)
 NAME = f"FastASR-{VERSION}-win-x64"
-REPORT_NAMES = ["xasr-self-test.json", "pipeline-probe.json"]
+REPORT_NAMES = ["xasr-self-test.json", "pipeline-probe.json", "hook-lifecycle.json"]
 UI_REPORT_NAMES = ["input-probe.json", "ui-probe.json", "hotkey-probe.json"]
 
 def digest(path):

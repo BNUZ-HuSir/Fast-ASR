@@ -1,19 +1,25 @@
 # Fast ASR
 
-轻量 Windows 本地中英文语音输入工具，开发者 **Elza**。当前版本 **0.3.5 Preview**，仅使用 **X-ASR-zh-en INT8 480 ms**，权重约 169 MB。原生 Win32 界面，CPU 推理，不需要 Python、CUDA 或显卡。
+轻量 Windows 本地中英文语音输入工具，开发者 **Elza**。当前版本 **0.3.6 Preview**，仅使用 **X-ASR-zh-en INT8 480 ms**，权重约 169 MB。原生 Win32 界面，CPU 推理，不需要 Python、CUDA 或显卡。
 
 这是个人学习、开发实验与非营利技术分享项目；原创代码采用 MIT 许可，上游模型与运行库保留各自许可。用途说明不改变上游授权。详情见 [第三方声明](THIRD_PARTY_NOTICES.md) 和 [项目说明](docs/LEGAL.md)。
 
 ![悬浮窗](docs/images/overlay.png)
 
+*截图来自 0.3.5，仅作界面示意；本版默认手势已改为左 Alt 长按 0.5 秒。*
+
+> 本次为预览交付：通过新构建的模型、音频管线及私有桌面钩子退出检查；当前会话有旧诊断残留，真实 Alt 组合、自动填写和 UI 回归尚未完成。详见 [验证记录](docs/validation.md)。请先退出旧版；若旧进程无法结束，保存工作并重启 Windows 后再试。
+
 ## 开始使用
 
-1. 完整解压 `FastASR-0.3.5-win-x64.zip`，双击其中的 `FastASR.exe`，等待模型就绪。
-2. 点击目标输入框，单独按住左或右 **Ctrl 至少 0.3 秒**，麦克风变红后说话。
-3. 按住期间在悬浮窗实时预览；松开 Ctrl 后，最终文字填入原输入框。不会按回车或发送消息。
+1. 完整解压 `FastASR-0.3.6-win-x64.zip`，双击其中的 `FastASR.exe`，等待模型就绪。
+2. 点击目标输入框，单独按住 **左 Alt 至少 0.5 秒**，麦克风变红后说话。
+3. 按住期间在悬浮窗实时预览；松开左 Alt 后，最终文字填入原输入框。不会按回车或发送消息。
 4. 也可点击绿色麦克风开始连续输入，停顿后自动填写；再次点击红色停止按钮结束。
 
-首次使用默认启用 Ctrl 长按，启动时麦克风仍然关闭。升级时保留已明确保存的快捷键偏好；旧用户若关闭过快捷键，可在设置中选择 Ctrl 长按。按 Esc 或在长按录音中使用 Ctrl 组合键，会取消本次尚未填写的内容。单次长按最长 60 秒；触发前不采集语音。
+首次使用默认启用 左 Alt 长按，启动时麦克风仍然关闭。升级时保留已明确保存的快捷键偏好；旧用户若关闭过快捷键，可在设置中选择 左 Alt 长按。按 Esc 或在长按录音中使用 Alt 组合键、Alt+鼠标点击/滚轮，会取消本次尚未填写的内容。单次长按最长 60 秒；触发前不采集语音。
+
+短按左 Alt 保留原生菜单按键；长按录音松开时不向应用发送 Alt 菜单事件。Alt+Tab、Alt+F4、Alt+Space 等组合会恢复原组合，已开始的录音草稿取消。录音已触发时，Alt+Esc 专用于取消，不执行原生切窗；触发前 Alt+Esc 正常转发。右 Alt / AltGr 不触发录音。Alt+鼠标按下或滚轮转发修饰键并取消草稿，单纯移动鼠标不取消。某些游戏、提权应用、远程桌面及依赖物理按键状态的软件仍需实测。
 
 标题栏圆角图钉按钮切换置顶：青绿色表示已置顶，灰色表示未置顶，重启保留选择；点击不会抢走输入焦点。设置只有麦克风和快捷键选项，并标注“开发者：Elza”。
 
@@ -57,10 +63,12 @@ python scripts/package.py --require-ui
 python scripts/validate_package.py
 ```
 
-开发运行时设置 `FAST_ASR_HOME` 为源码根目录；便携版无需设置。诊断入口包括 `--self-test`、`--pipeline-probe`、`--hotkey-probe`、`--input-probe`、`--ui-probe`。WAV 管线不打开麦克风；交互检查只在自建测试输入框模拟输入，运行期间请保持桌面空闲。检查通过代表流程与基本输出通过，不代表 CER/WER 达标。
+开发运行时设置 `FAST_ASR_HOME` 为源码根目录；便携版无需设置。诊断入口包括私有桌面 `--hook-lifecycle-probe`（使用 `python scripts/check_hook_lifecycle.py` 启动）、`--self-test`、`--pipeline-probe`、`--hotkey-probe`、`--input-probe`、`--ui-probe`。WAV 管线不打开麦克风；交互检查只在自建测试输入框模拟输入，运行期间请保持桌面空闲。检查通过代表流程与基本输出通过，不代表 CER/WER 达标。
+
+仅在已知桌面验收未完成、需要本地预览交付时，显式运行 `python scripts/package.py --preview-without-desktop-tests`。该模式继续要求新构建的音频与钩子清理报告，排除旧桌面报告，并在交付元数据中标记缺测；正式验证仍使用 `--require-ui`。
 
 ## 发布
 
 请完整解压压缩包，保留 `runtime/`、`models/` 和许可证，不能只复制 exe。当前程序未签名，可用同版本 `SHA256SUMS` 校验。CI 构建、WAV 检查并校验包，桌面回归在本机执行；CI 产物为源码包与报告。完整离线包由维护者另行发布。
 
-本版评审见 [0.3.5 发布记录](docs/release-review-0.3.5.md)。开发反馈见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私与输入保护边界见 [SECURITY.md](SECURITY.md)。
+本版评审见 [0.3.6 发布记录](docs/release-review-0.3.6.md)。开发反馈见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私与输入保护边界见 [SECURITY.md](SECURITY.md)。

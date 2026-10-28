@@ -1,7 +1,7 @@
 use crate::{
     audio,
     config::Settings,
-    hotkey::{self, CtrlHotkey},
+    hotkey::{self, AltHotkey},
     input::{self, Target, wide},
     worker::{Command, Event, Worker},
 };
@@ -68,7 +68,7 @@ pub struct App {
     mic_combo: HWND,
     hotkey_mode_combo: HWND,
     hotkey_registered: bool,
-    ctrl_hotkey: Option<CtrlHotkey>,
+    alt_hotkey: Option<AltHotkey>,
     probe_stage: Option<u32>,
     probe_benchmark: Option<serde_json::Value>,
 }
@@ -308,7 +308,7 @@ impl App {
         };
     }
     fn tick(&mut self) {
-        let ctrl_allowed = self.settings.hotkey
+        let alt_allowed = self.settings.hotkey
             && self.settings.hotkey_hold
             && self.settings_hwnd.is_null()
             && self.ready
@@ -316,9 +316,9 @@ impl App {
             && !self.listening
             && !self.hold_pressed;
         if self
-            .ctrl_hotkey
+            .alt_hotkey
             .as_ref()
-            .is_some_and(|hook| hook.poll(ctrl_allowed))
+            .is_some_and(|hook| hook.poll(alt_allowed))
         {
             self.start(true);
         }
@@ -331,7 +331,7 @@ impl App {
                     self.ready = true;
                     self.busy = false;
                     self.notice = if self.settings.hotkey && self.settings.hotkey_hold {
-                        "点击输入框，长按 Ctrl 0.3 秒开始 · 松开填写"
+                        "点击输入框，长按左 Alt 0.5 秒开始 · 松开填写"
                     } else {
                         "先点击输入框，再点麦克风开始"
                     }
@@ -463,7 +463,7 @@ impl App {
                     let simplified = [100, 102, 105, 106]
                         .into_iter()
                         .all(|id| GetDlgItem(self.settings_hwnd, id).is_null());
-                    let settings_check = serde_json::json!({"passed":credit_ok&&shortcut_ok&&simplified,"developer_credit":credit_ok,"shortcut_selection_matches_preferences":shortcut_ok,"no_model_or_vad_selectors":simplified,"first_use_ctrl_hold":Settings::default().hotkey&&Settings::default().hotkey_hold});
+                    let settings_check = serde_json::json!({"passed":credit_ok&&shortcut_ok&&simplified,"developer_credit":credit_ok,"shortcut_selection_matches_preferences":shortcut_ok,"no_model_or_vad_selectors":simplified,"first_use_left_alt_hold":Settings::default().hotkey&&Settings::default().hotkey_hold});
                     // Keep the foreground settings window alive while the test host
                     // is activated; destroying it first hands focus to another app.
                     let regression = self.regression_probe();
@@ -670,16 +670,16 @@ impl App {
     }
     fn set_hotkey(&mut self) {
         self.release_hold(false);
-        self.ctrl_hotkey = None;
+        self.alt_hotkey = None;
         unsafe {
             if self.hotkey_registered {
                 UnregisterHotKey(self.hwnd, HOTKEY);
                 self.hotkey_registered = false;
             }
             if self.settings.hotkey && self.settings.hotkey_hold {
-                match CtrlHotkey::install(self.hwnd, false) {
+                match AltHotkey::install(self.hwnd, false) {
                     Ok(hook) => {
-                        self.ctrl_hotkey = Some(hook);
+                        self.alt_hotkey = Some(hook);
                     }
                     Err(e) => {
                         self.settings.hotkey = false;
@@ -784,7 +784,7 @@ impl App {
             );
             for label in [
                 "关闭 · 使用麦克风按钮",
-                "Ctrl 长按 0.3 秒录音 · 松开后填写",
+                "左 Alt 长按 0.5 秒录音 · 松开后填写",
                 "Ctrl+Alt+空格 · 按一次开始/停止",
             ] {
                 SendMessageW(
@@ -1153,7 +1153,7 @@ impl App {
             }
             let subtitle = if self.listening {
                 if self.hold_pressed {
-                    "松开 Ctrl 填写"
+                    "松开 Alt 填写"
                 } else {
                     "连续输入 · 点击停止"
                 }
@@ -1338,19 +1338,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 app.tick();
                 0
             }
-            hotkey::CTRL_FAILED => {
+            hotkey::HOLD_FAILED => {
                 app.stop(true);
                 app.settings.hotkey = false;
                 app.set_hotkey();
                 let _ = app.settings.save(&app.home);
-                app.notice = "Ctrl 键盘转发受限，快捷键已关闭，请使用麦克风按钮".into();
+                app.notice = "Alt 输入转发受限，快捷键已关闭，请使用麦克风按钮".into();
                 0
             }
-            hotkey::CTRL_RELEASE => {
+            hotkey::HOLD_RELEASE => {
                 app.release_hold(false);
                 0
             }
-            hotkey::CTRL_CANCEL => {
+            hotkey::HOLD_CANCEL => {
                 app.stop(true);
                 0
             }
@@ -1579,7 +1579,7 @@ pub fn run(home: PathBuf, probe: bool) -> Result<(), String> {
             mic_combo: null_mut(),
             hotkey_mode_combo: null_mut(),
             hotkey_registered: false,
-            ctrl_hotkey: None,
+            alt_hotkey: None,
             probe_stage: if probe { Some(0) } else { None },
             probe_benchmark: None,
         });

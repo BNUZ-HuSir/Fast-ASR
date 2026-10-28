@@ -220,18 +220,12 @@ pub unsafe fn focus_probe_window(
     edit: windows_sys::Win32::Foundation::HWND,
 ) {
     unsafe {
-        use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-        let current = GetCurrentThreadId();
-        let foreground = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
-        let attached = foreground != 0
-            && foreground != current
-            && AttachThreadInput(current, foreground, 1) != 0;
+        // Never attach another application's input queue: a hung foreground
+        // window can block AttachThreadInput / activation indefinitely. The
+        // caller verifies foreground and focus before sending any test input.
         SetForegroundWindow(host);
         windows_sys::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(host);
         SetFocus(edit);
-        if attached {
-            AttachThreadInput(current, foreground, 0);
-        }
     }
 }
 
@@ -584,23 +578,17 @@ pub fn pipeline_probe(home: &Path) -> Result<PathBuf, String> {
     Ok(report)
 }
 
-/// Exercise the installed Ctrl hook against our own EDIT; never opens a microphone.
+/// Exercise the installed left Alt hook against our own EDIT; never opens a microphone.
 pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
-    use crate::hotkey::{self, CtrlHotkey};
-    use std::{
-        sync::atomic::{AtomicUsize, Ordering},
-        thread,
-        time::Duration,
-    };
+    use crate::hotkey::{self, AltHotkey};
+    use std::{thread, time::Duration};
     use windows_sys::Win32::{
         Foundation::*, System::LibraryLoader::GetModuleHandleW, UI::Input::KeyboardAndMouse::*,
     };
-    static MENU_REQUESTS: AtomicUsize = AtomicUsize::new(0);
     unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         unsafe {
-            // Count native menu activation without entering a modal system-menu loop.
+            // Do not enter a modal system-menu loop in the diagnostic host.
             if msg == WM_SYSCOMMAND && w & 0xfff0 == SC_KEYMENU as usize {
-                MENU_REQUESTS.fetch_add(1, Ordering::Relaxed);
                 return 0;
             }
             DefWindowProcW(hwnd, msg, w, l)
@@ -612,33 +600,60 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
         releases: u32,
         cancels: u32,
         failures: u32,
-        native_ctrl: u32,
+        native_alt: u32,
+        native_alt_up: u32,
         native_combo: u32,
+        native_mouse: u32,
+        native_ctrl_combo: u32,
     }
-    fn pump(hook: &CtrlHotkey, counts: &mut Counts, millis: u64) {
+    fn pump(hook: &AltHotkey, counts: &mut Counts, millis: u64) {
+        let _ = fs::write(
+            crate::config::home().join("reports/hotkey-stage.txt"),
+            format!(
+                "pump {millis} start={},{},{} trace={:?}",
+                counts.starts,
+                counts.releases,
+                counts.cancels,
+                hook.diagnostic_trace()
+            ),
+        );
         let start = Instant::now();
         while start.elapsed() < Duration::from_millis(millis) {
             unsafe {
                 let mut msg = zeroed();
                 while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                     match msg.message {
-                        hotkey::CTRL_RELEASE => counts.releases += 1,
-                        hotkey::CTRL_CANCEL => counts.cancels += 1,
-                        hotkey::CTRL_FAILED => counts.failures += 1,
+                        hotkey::HOLD_RELEASE => counts.releases += 1,
+                        hotkey::HOLD_CANCEL => counts.cancels += 1,
+                        hotkey::HOLD_FAILED => counts.failures += 1,
                         WM_SYSKEYDOWN | WM_KEYDOWN
-                            if [
-                                VK_CONTROL as usize,
-                                VK_LCONTROL as usize,
-                                VK_RCONTROL as usize,
-                            ]
-                            .contains(&msg.wParam) =>
+                            if [VK_MENU as usize, VK_LMENU as usize, VK_RMENU as usize]
+                                .contains(&msg.wParam) =>
                         {
-                            counts.native_ctrl += 1
+                            counts.native_alt += 1
                         }
-                        WM_KEYDOWN if msg.wParam == 0x41 && GetKeyState(VK_CONTROL as i32) < 0 => {
+                        WM_SYSKEYDOWN | WM_KEYDOWN
+                            if msg.wParam == 0x41 && GetKeyState(VK_MENU as i32) < 0 =>
+                        {
                             counts.native_combo += 1
                         }
+                        WM_KEYDOWN if msg.wParam == 0x41 && GetKeyState(VK_CONTROL as i32) < 0 => {
+                            counts.native_ctrl_combo += 1
+                        }
+                        WM_MOUSEWHEEL if GetKeyState(VK_MENU as i32) < 0 => {
+                            counts.native_mouse += 1
+                        }
                         _ => {}
+                    }
+                    // Native Alt-up and access keys can enter a modal menu loop in
+                    // the stock EDIT. Observe the delivered events without opening
+                    // that loop; the diagnostic never operates an application's menu.
+                    if msg.message == WM_SYSKEYUP && msg.wParam == VK_MENU as usize {
+                        counts.native_alt_up += 1;
+                        continue;
+                    }
+                    if matches!(msg.message, WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR) {
+                        continue;
                     }
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
@@ -652,7 +667,7 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
     }
     fn key(host: HWND, edit: HWND, vk: u16, up: bool) -> Result<(), String> {
         unsafe {
-            // A native short Ctrl tap may move focus to this window's menu.
+            // A native short Alt tap may move focus to this window's menu.
             // Restore only our own edit; never send test keys to another window.
             if !up && GetForegroundWindow() == host && GetFocus() != edit {
                 SetFocus(edit);
@@ -672,7 +687,12 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
                     ki: KEYBDINPUT {
                         wVk: vk,
                         wScan: 0,
-                        dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                        dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }
+                            | if vk == VK_RMENU {
+                                KEYEVENTF_EXTENDEDKEY
+                            } else {
+                                0
+                            },
                         time: 0,
                         dwExtraInfo: hotkey::TEST_INPUT,
                     },
@@ -684,9 +704,55 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
             Ok(())
         }
     }
+    fn wheel(host: HWND, edit: HWND) -> Result<std::thread::JoinHandle<bool>, String> {
+        unsafe {
+            if GetForegroundWindow() != host || GetFocus() != edit {
+                return Err("Mouse test lost its owned input focus; no input sent".into());
+            }
+            let mut rect = zeroed();
+            GetWindowRect(edit, &mut rect);
+            let mut cursor = zeroed();
+            GetCursorPos(&mut cursor);
+            if cursor.x < rect.left
+                || cursor.x >= rect.right
+                || cursor.y < rect.top
+                || cursor.y >= rect.bottom
+            {
+                return Err("Mouse test cursor left the owned input; no input sent".into());
+            }
+            // Inject mouse input from a separate source thread while the owner
+            // pumps its installed hooks, just as with an external input device.
+            let host_id = host as usize;
+            let edit_id = edit as usize;
+            Ok(thread::spawn(move || {
+                let mut point = zeroed();
+                GetCursorPos(&mut point);
+                if GetForegroundWindow() as usize != host_id
+                    || WindowFromPoint(point) as usize != edit_id
+                {
+                    return false;
+                }
+                let event = INPUT {
+                    r#type: INPUT_MOUSE,
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dx: 0,
+                            dy: 0,
+                            mouseData: 120,
+                            dwFlags: MOUSEEVENTF_WHEEL,
+                            time: 0,
+                            dwExtraInfo: hotkey::TEST_INPUT,
+                        },
+                    },
+                };
+                SendInput(1, &event, size_of::<INPUT>() as i32) == 1
+            }))
+        }
+    }
     unsafe {
+        let _ = fs::write(home.join("reports/hotkey-stage.txt"), "create");
         let instance = GetModuleHandleW(std::ptr::null());
-        let name = wide("FastAsrCtrlProbe");
+        let name = wide("FastAsrAltProbe");
         let mut wc: WNDCLASSEXW = zeroed();
         wc.cbSize = size_of::<WNDCLASSEXW>() as u32;
         wc.lpfnWndProc = Some(proc);
@@ -698,7 +764,7 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
         let host = CreateWindowExW(
             0,
             name.as_ptr(),
-            wide("Fast ASR · Ctrl 快捷键自测（不录音）").as_ptr(),
+            wide("Fast ASR · 左 Alt 快捷键自测（不录音）").as_ptr(),
             WS_OVERLAPPEDWINDOW,
             100,
             100,
@@ -724,7 +790,9 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
             std::ptr::null(),
         );
         ShowWindow(host, SW_SHOW);
+        let _ = fs::write(home.join("reports/hotkey-stage.txt"), "focus");
         focus_probe_window(host, edit);
+        let _ = fs::write(home.join("reports/hotkey-stage.txt"), "activate-drain");
         // Drain activation before installing the hook or sending synthetic keys.
         for _ in 0..30 {
             let mut msg = zeroed();
@@ -734,66 +802,142 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
             }
             thread::sleep(Duration::from_millis(5));
         }
+        let mut original_cursor = zeroed();
+        GetCursorPos(&mut original_cursor);
+        let hook = AltHotkey::install(host, true)?;
         let outcome = (|| -> Result<Value, String> {
             if GetForegroundWindow() != host || GetFocus() != edit {
                 return Err("Hotkey test could not focus its own input".into());
             }
-            let hook = CtrlHotkey::install(host, true)?;
             let mut counts = Counts::default();
-            key(host, edit, VK_LCONTROL, false)?;
+            key(host, edit, VK_LMENU, false)?;
             pump(&hook, &mut counts, 160);
-            key(host, edit, VK_LCONTROL, true)?;
+            key(host, edit, VK_LMENU, true)?;
             pump(&hook, &mut counts, 120);
-            let short_ctrl = counts.starts == 0 && counts.releases == 0 && counts.native_ctrl > 0;
-            let native_before = counts.native_ctrl;
-            let menus_before = MENU_REQUESTS.load(Ordering::Relaxed);
-            key(host, edit, VK_LCONTROL, false)?;
-            pump(&hook, &mut counts, 220);
+            let short_alt = counts.starts == 0
+                && counts.releases == 0
+                && counts.native_alt > 0
+                && counts.native_alt_up > 0;
+            let native_before = counts.native_alt;
+            let alt_up_before = counts.native_alt_up;
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 440);
             let no_early_start = counts.starts == 0;
             pump(&hook, &mut counts, 180);
             let start_after_threshold = counts.starts == 1;
             for _ in 0..3 {
-                key(host, edit, VK_LCONTROL, false)?;
+                key(host, edit, VK_LMENU, false)?;
                 pump(&hook, &mut counts, 30);
             }
             let once_per_hold = counts.starts == 1;
-            key(host, edit, VK_LCONTROL, true)?;
+            key(host, edit, VK_LMENU, true)?;
             pump(&hook, &mut counts, 120);
             let release = counts.releases == 1;
-            let no_menu = counts.native_ctrl == native_before
-                && MENU_REQUESTS.load(Ordering::Relaxed) == menus_before;
-            key(host, edit, VK_LCONTROL, false)?;
+            let no_menu =
+                counts.native_alt == native_before && counts.native_alt_up == alt_up_before;
+            key(host, edit, VK_LMENU, false)?;
             pump(&hook, &mut counts, 100);
             key(host, edit, 0x41, false)?;
             pump(&hook, &mut counts, 60);
             key(host, edit, 0x41, true)?;
-            key(host, edit, VK_LCONTROL, true)?;
+            key(host, edit, VK_LMENU, true)?;
             pump(&hook, &mut counts, 120);
             let combo = counts.native_combo > 0 && counts.starts == 1;
-            key(host, edit, VK_LCONTROL, false)?;
-            pump(&hook, &mut counts, 410);
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 610);
             key(host, edit, VK_ESCAPE, false)?;
             pump(&hook, &mut counts, 60);
             key(host, edit, VK_ESCAPE, true)?;
-            key(host, edit, VK_LCONTROL, true)?;
+            key(host, edit, VK_LMENU, true)?;
             pump(&hook, &mut counts, 100);
             let cancel = counts.starts == 2 && counts.cancels == 1 && counts.releases == 1;
+            // Ctrl shortcuts now bypass the recording gesture completely.
+            let starts_before = counts.starts;
+            key(host, edit, VK_LCONTROL, false)?;
+            pump(&hook, &mut counts, 600);
+            key(host, edit, 0x41, false)?;
+            pump(&hook, &mut counts, 60);
+            key(host, edit, 0x41, true)?;
+            key(host, edit, VK_LCONTROL, true)?;
+            pump(&hook, &mut counts, 100);
+            let ctrl_untouched = counts.starts == starts_before && counts.native_ctrl_combo > 0;
+            key(host, edit, VK_RMENU, false)?;
+            pump(&hook, &mut counts, 600);
+            key(host, edit, VK_RMENU, true)?;
+            pump(&hook, &mut counts, 100);
+            let right_alt_untouched = counts.starts == starts_before;
+            // Keep all pointer input inside the diagnostic-owned EDIT.
+            let mut edit_rect = zeroed();
+            GetWindowRect(edit, &mut edit_rect);
+            SetCursorPos(edit_rect.left + 40, edit_rect.top + 20);
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 100);
+            let wheel_input = wheel(host, edit)?;
+            pump(&hook, &mut counts, 100);
+            if !wheel_input.is_finished() || !wheel_input.join().unwrap_or(false) {
+                return Err(
+                    "Mouse injection did not complete while pumping the owned input".into(),
+                );
+            }
+            key(host, edit, VK_LMENU, true)?;
+            pump(&hook, &mut counts, 100);
+            let mouse_pending = counts.starts == starts_before && counts.native_mouse > 0;
+            let mouse_before = counts.native_mouse;
+            let cancels_before = counts.cancels;
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 610);
+            let wheel_input = wheel(host, edit)?;
+            pump(&hook, &mut counts, 100);
+            if !wheel_input.is_finished() || !wheel_input.join().unwrap_or(false) {
+                return Err(
+                    "Mouse injection did not complete while pumping the owned input".into(),
+                );
+            }
+            key(host, edit, VK_LMENU, true)?;
+            pump(&hook, &mut counts, 100);
+            let mouse_recording = counts.starts == starts_before + 1
+                && counts.cancels == cancels_before + 1
+                && counts.native_mouse > mouse_before;
+            // A keyboard chord after the threshold must cancel, not submit.
+            let cancels_before = counts.cancels;
+            let combos_before = counts.native_combo;
+            key(host, edit, VK_LMENU, false)?;
+            pump(&hook, &mut counts, 610);
+            key(host, edit, 0x41, false)?;
+            pump(&hook, &mut counts, 70);
+            key(host, edit, 0x41, true)?;
+            key(host, edit, VK_LMENU, true)?;
+            pump(&hook, &mut counts, 100);
+            let chord_cancels = counts.cancels == cancels_before + 1
+                && counts.native_combo > combos_before
+                && counts.releases == 1;
             let no_stuck_modifiers = !input::modifiers_down();
             let no_characters = GetWindowTextLengthW(edit) == 0;
             Ok(
                 json!({"version":env!("CARGO_PKG_VERSION"),"executable_sha256":executable_sha256()?,
-                "source":"Installed Windows low-level Ctrl hook, synthetic tagged keys, owned EDIT; no microphone",
-                "passed":short_ctrl&&no_early_start&&start_after_threshold&&once_per_hold&&release&&no_menu&&combo&&cancel&&no_stuck_modifiers&&no_characters&&counts.failures==0,
-                "short_ctrl_restored":short_ctrl,"no_start_before_300ms":no_early_start,"starts_after_300ms":start_after_threshold,
-                "once_per_hold":once_per_hold,"release_submits":release,"long_ctrl_does_not_activate_menu":no_menu,
-                "ctrl_letter_preserves_native_combo":combo,"escape_cancels":cancel,"no_stuck_modifiers":no_stuck_modifiers,
-                "no_typed_characters":no_characters,"replay_failures":counts.failures,"counts":{"start":counts.starts,"release":counts.releases,"cancel":counts.cancels,"ctrl":counts.native_ctrl,"combo":counts.native_combo},"trace":hook.diagnostic_trace()}),
+                "source":"Installed Windows low-level left Alt hook, synthetic tagged keys, owned EDIT; no microphone",
+                "passed":short_alt&&no_early_start&&start_after_threshold&&once_per_hold&&release&&no_menu&&combo&&cancel&&no_stuck_modifiers&&no_characters&&counts.failures==0&&ctrl_untouched&&right_alt_untouched&&mouse_pending&&mouse_recording&&chord_cancels,
+                "short_alt_restored":short_alt,"no_start_before_500ms":no_early_start,"starts_after_500ms":start_after_threshold,
+                "once_per_hold":once_per_hold,"release_submits":release,"long_alt_not_forwarded_to_native_menu":no_menu,
+                "alt_letter_preserves_native_combo":combo,"escape_cancels":cancel,"ctrl_shortcuts_untouched":ctrl_untouched,"right_alt_no_recording":right_alt_untouched,"alt_mouse_before_threshold_forwards":mouse_pending,"alt_mouse_during_recording_cancels_and_forwards":mouse_recording,"keyboard_chord_during_recording_cancels_and_forwards":chord_cancels,"no_stuck_modifiers":no_stuck_modifiers,
+                "no_typed_characters":no_characters,"replay_failures":counts.failures,"counts":{"start":counts.starts,"release":counts.releases,"cancel":counts.cancels,"alt":counts.native_alt,"combo":counts.native_combo,"mouse":counts.native_mouse,"ctrl_combo":counts.native_ctrl_combo},"trace":hook.diagnostic_trace()}),
             )
         })();
+        if let Err(error) = &outcome {
+            let trace = hook.diagnostic_trace();
+            let _ = fs::write(
+                home.join("reports/hotkey-error-trace.txt"),
+                format!("{error}\n{trace:#?}"),
+            );
+        }
         // Always balance synthetic keys before closing the test window, including errors.
         let _ = key(host, edit, 0x41, true);
         let _ = key(host, edit, VK_ESCAPE, true);
+        let _ = key(host, edit, VK_LMENU, true);
+        let _ = key(host, edit, VK_RMENU, true);
         let _ = key(host, edit, VK_LCONTROL, true);
+        drop(hook);
+        SetCursorPos(original_cursor.x, original_cursor.y);
         DestroyWindow(host);
         let report = home.join("reports/hotkey-probe.json");
         fs::create_dir_all(report.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -801,4 +945,33 @@ pub fn hotkey_probe(home: &Path) -> Result<PathBuf, String> {
             .map_err(|e| e.to_string())?;
         Ok(report)
     }
+}
+
+/// Run only on a private desktop via scripts/check_hook_lifecycle.py.
+/// No microphone, keyboard/mouse injection or foreground manipulation.
+pub fn hook_lifecycle_probe(home: &Path) -> Result<PathBuf, String> {
+    let mut cycles = 0;
+    for _ in 0..5 {
+        let mut hook = crate::hotkey::AltHotkey::install(std::ptr::null_mut(), false)?;
+        if hook.poll(false) {
+            return Err("Unexpected recording start".into());
+        }
+        hook.shutdown()?;
+        cycles += 1;
+    }
+    let report = home.join("reports/hook-lifecycle-probe.json");
+    fs::create_dir_all(home.join("reports")).map_err(|e| e.to_string())?;
+    fs::write(
+        &report,
+        serde_json::to_vec_pretty(&json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "executable_sha256": executable_sha256()?,
+            "process_id": std::process::id(), "cycles": cycles,
+            "keyboard_and_mouse_hooks": true, "input_injected": false,
+            "microphone_opened": false, "passed": cycles == 5,
+        }))
+        .unwrap(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(report)
 }

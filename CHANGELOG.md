@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.6 Preview — 2026-10-28
+
+- 默认录音手势改为单独左 Alt 长按 0.5 秒，长按期间流式预览，松开填写。右 Alt / AltGr 与 Ctrl 不触发。
+- 短按 Alt 恢复原生按键，长按录音不激活菜单；Alt 组合键恢复原组合并取消尚未提交的草稿。
+- 新增 Alt+鼠标按下和滚轮转发，保留修饰键与事件顺序；单纯移动鼠标不打断。其他键或鼠标按钮已按住时不触发长按。
+- 录音已触发时 Alt+Esc 用于取消，不执行原生切窗；触发前保留原组合。说明兼容边界。
+- 键鼠钩子与输入重放移到独立线程，退出等待设限；移除诊断中的跨应用输入队列绑定。
+- 新增私有桌面的真实钩子安装/卸载和原生进程退出检查；本次交付标记为 Preview，真实桌面快捷键、自动填写和 UI 回归仍待完成。
+
 ## 0.3.5 — 2026-10-27
 
 - Only X-ASR-zh-en 480 ms INT8 is active and bundled; remove Whisper and Silero runtime dependencies from the application and default setup.

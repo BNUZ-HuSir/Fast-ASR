@@ -60,7 +60,7 @@ pub fn home() -> PathBuf {
 mod tests {
     use super::*;
     #[test]
-    fn first_use_and_invalid_config_enable_ctrl_hold() {
+    fn first_use_and_invalid_config_enable_hold() {
         for bytes in [b"".as_slice(), b"{}", b"broken"] {
             let s = Settings::from_bytes(bytes);
             assert!(s.hotkey && s.hotkey_hold);

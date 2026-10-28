@@ -11,7 +11,11 @@ from check_licenses import license_materials
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-ui", action="store_true", help="Require desktop input and pin-button regression reports")
+    parser.add_argument("--preview-without-desktop-tests", action="store_true",
+                        help="Explicitly package a preview with desktop regressions pending; never reuse old UI reports")
     args = parser.parse_args()
+    if args.require_ui and args.preview_without_desktop_tests:
+        parser.error("--require-ui and --preview-without-desktop-tests are mutually exclusive")
     notices = license_materials()
     executable = ROOT / ".build/target/release/fast-asr.exe"
     executable_hash = digest(executable)
@@ -19,6 +23,8 @@ def main():
     reports = []
     for name in REPORT_NAMES + UI_REPORT_NAMES:
         path = report_dir / name
+        if name in UI_REPORT_NAMES and args.preview_without_desktop_tests:
+            continue
         if name in UI_REPORT_NAMES and not args.require_ui and not path.exists():
             continue
         report = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -70,13 +76,19 @@ def main():
     inventory_path = ROOT / ".build/rust-dependencies.json"
     inventory_path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
     copy(inventory_path, "licenses/rust-dependencies.json")
-    for name in ["architecture.md", "usage.md", "validation.md", "release-review-0.3.1.md", "release-review-0.3.2.md", "release-review-0.3.3.md", "release-review-0.3.4.md", "release-review-0.3.5.md"]:
+    for name in ["architecture.md", "usage.md", "validation.md", "release-review-0.3.1.md", "release-review-0.3.2.md", "release-review-0.3.3.md", "release-review-0.3.4.md", "release-review-0.3.5.md", "release-review-0.3.6.md"]:
         copy(Path("docs") / name, Path("docs") / name)
     for file in (ROOT / "docs/images").glob("*.png"):
         copy(file, Path("docs/images") / file.name)
     for file in reports:
         copy(file, Path("docs/test-results") / file.name)
-    info = {"version": VERSION, "default": "x-asr-zh-en-480ms", "models": ["x-asr-zh-en-480ms"], "external_vad": False, "developer": "Elza", "first_use_shortcut": "Ctrl hold 300 ms", "cpu_only": True,
+    limitations = []
+    if not all((report_dir / name) in reports for name in UI_REPORT_NAMES):
+        limitations.append("Native desktop shortcut, focus/input and UI regressions are pending for this executable. Historical diagnostic processes have incomplete termination; see docs/validation.md.")
+    info = {"release_channel": "preview" if limitations else "reviewed",
+            "validation_limitations": limitations,
+            "desktop_tests_pending": [name for name in UI_REPORT_NAMES if (report_dir / name) not in reports],
+            "version": VERSION, "default": "x-asr-zh-en-480ms", "models": ["x-asr-zh-en-480ms"], "external_vad": False, "developer": "Elza", "first_use_shortcut": "Left Alt hold 500 ms", "cpu_only": True,
             "desktop_regressions_verified": all((report_dir / name) in reports for name in UI_REPORT_NAMES), "executable_sha256": executable_hash, "files": files}
     (out / "build-info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
     archive = ROOT / "dist" / (NAME + ".zip")

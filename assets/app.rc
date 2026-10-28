@@ -1,8 +1,8 @@
 #include <windows.h>
 1 ICON "app.ico"
 1 VERSIONINFO
- FILEVERSION 0,3,5,0
- PRODUCTVERSION 0,3,5,0
+ FILEVERSION 0,3,6,0
+ PRODUCTVERSION 0,3,6,0
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
 BEGIN
@@ -12,9 +12,9 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "Elza"
    VALUE "FileDescription", "Fast ASR - Local Speech Input"
-   VALUE "FileVersion", "0.3.5"
+   VALUE "FileVersion", "0.3.6"
    VALUE "ProductName", "Fast ASR"
-   VALUE "ProductVersion", "0.3.5"
+   VALUE "ProductVersion", "0.3.6"
   END
  END
  BLOCK "VarFileInfo"
